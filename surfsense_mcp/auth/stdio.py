@@ -1,40 +1,35 @@
 """Stdio-mode auth: SurfSense JWT (env paste or password fallback).
 
-The stdio transport runs as a subprocess of an MCP client (Claude Desktop,
-Cursor, …) on the user's laptop. SurfSense's fastapi-users issues short-lived
-JWTs, so this module owns:
+The cache + concurrent-login serialization plumbing is generic and lives
+in :class:`moneta_mcp_auth.stdio.PasswordTokenCache`. This module owns
+the SurfSense-specific pieces:
 
-- ``SURFSENSE_JWT`` — the primary path: user pastes a fresh token when one
-  expires. The server never refreshes it.
-- ``SURFSENSE_EMAIL`` + ``SURFSENSE_PASSWORD`` — optional fallback for CI /
-  long-running sessions. We exchange these for a JWT via ``POST /auth/jwt/login``,
-  cache it for ``TOKEN_TTL`` seconds (default 3300 = 55 min, comfortably
-  inside fastapi-users' typical 60-min expiry), and let the client retry
-  once on 401 to recover when the cache outlives the server-side token.
+- ``SURFSENSE_JWT`` env var (primary path — user pastes a fresh token
+  when one expires; the server never refreshes it).
+- ``SURFSENSE_EMAIL`` + ``SURFSENSE_PASSWORD`` fallback that exchanges
+  the credentials for a JWT via ``POST /auth/jwt/login`` on the SurfSense
+  backend.
+- The ``TOKEN_TTL`` env var that sets the password cache's TTL.
 
-The cache is module-level state guarded by a ``Lock`` so that concurrent
-tool calls don't double-issue logins.
+The module-level singleton :data:`_password_cache` is lazily constructed
+on first password-mode call so importing the module doesn't try to set
+up the cache before env vars are configured.
 """
 
 from __future__ import annotations
 
-import asyncio
 import os
-import time
-from threading import Lock
 
 import httpx
 from fastmcp.utilities.logging import get_logger
+from moneta_mcp_auth.stdio import PasswordTokenCache
 
 logger = get_logger(__name__)
 
 _DEFAULT_TIMEOUT_SECONDS = 30.0
 _DEFAULT_TOKEN_TTL_SECONDS = 3300
 
-_cached_password_token: str | None = None
-_cached_password_token_expires_at: float = 0.0
-_password_token_lock = Lock()
-_password_login_lock = asyncio.Lock()
+_password_cache: PasswordTokenCache | None = None
 
 
 def _base_url() -> str:
@@ -88,33 +83,32 @@ async def _login_with_password() -> str:
     return token
 
 
-def _get_cached_token() -> str | None:
-    with _password_token_lock:
-        if _cached_password_token and time.time() < _cached_password_token_expires_at:
-            return _cached_password_token
-    return None
-
-
-def _store_cached_token(token: str) -> None:
-    global _cached_password_token, _cached_password_token_expires_at
-    with _password_token_lock:
-        _cached_password_token = token
-        _cached_password_token_expires_at = time.time() + _token_ttl_seconds()
+def _get_password_cache() -> PasswordTokenCache:
+    """Lazy-build the module-level cache so import has no side effects."""
+    global _password_cache
+    if _password_cache is None:
+        _password_cache = PasswordTokenCache(_login_with_password, ttl_seconds=_token_ttl_seconds())
+    return _password_cache
 
 
 def invalidate_cache() -> None:
-    """Drop the cached password token so the next call forces a fresh login."""
-    global _cached_password_token, _cached_password_token_expires_at
-    with _password_token_lock:
-        _cached_password_token = None
-        _cached_password_token_expires_at = 0.0
+    """Drop the cached password token so the next call forces a fresh login.
+
+    Also discards the cache instance itself so a subsequent
+    :func:`_get_password_cache` call rebuilds it. This matters for tests
+    that monkeypatch :func:`_login_with_password` between cases — without
+    the instance reset the cache would still hold a closure over the
+    original function reference.
+    """
+    global _password_cache
+    _password_cache = None
 
 
 def is_password_in_use() -> bool:
-    """True iff stdio is currently relying on password-fallback (no env JWT,
-    both email + password configured). Used by the dispatcher to gate the
-    401-retry-once path: env-JWT and HTTP modes don't benefit from a retry,
-    only the password cache does.
+    """True iff stdio is currently relying on password-fallback.
+
+    Used by the dispatcher to gate the 401-retry-once path: env-JWT and
+    HTTP modes don't benefit from a retry, only the password cache does.
     """
     if os.getenv("SURFSENSE_JWT"):
         return False
@@ -135,20 +129,7 @@ async def resolve_jwt() -> str:
         return env_token
 
     if _has_password_creds():
-        cached = _get_cached_token()
-        if cached:
-            return cached
-        # Serialize concurrent logins so an empty cache + N parallel tool
-        # calls produce one POST /auth/jwt/login, not N. Re-check inside the
-        # lock — by the time we acquire it, an earlier caller may have
-        # already populated the cache.
-        async with _password_login_lock:
-            cached = _get_cached_token()
-            if cached:
-                return cached
-            token = await _login_with_password()
-            _store_cached_token(token)
-            return token
+        return await _get_password_cache().get()
 
     raise RuntimeError(
         "No SurfSense credential available. Set SURFSENSE_JWT, "

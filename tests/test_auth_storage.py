@@ -15,7 +15,6 @@ import importlib
 import pytest
 from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
 
-from surfsense_mcp.auth import storage as storage_module
 from surfsense_mcp.auth.storage import (
     ValkeyConfig,
     build_oauth_storage,
@@ -97,7 +96,7 @@ def test_raises_when_no_key_material_set(monkeypatch):
 
     with pytest.raises(
         ValueError,
-        match="neither MCP_JWT_SIGNING_KEY nor OIDC_CLIENT_SECRET is set",
+        match=r"none of \['OIDC_CLIENT_SECRET', 'MCP_JWT_SIGNING_KEY'\] are set",
     ):
         build_oauth_storage()
 
@@ -138,26 +137,8 @@ def test_builds_fernet_wrapped_valkey_store_from_jwt_signing_key(monkeypatch):
     assert isinstance(store.key_value, valkey_store_cls)
 
 
-def test_client_secret_takes_precedence_over_jwt_signing_key(monkeypatch):
-    """When both are set, OIDC_CLIENT_SECRET wins (confidential Cognito client
-    is the typical prod setup; the signing key is the sandbox/public fallback).
-    Spy on derive_jwt_key to record the material fed into HKDF.
-    """
-    pytest.importorskip("glide")
-
-    monkeypatch.setenv("MCP_OAUTH_STORAGE_URL", "redis://valkey:6379/11")
-    monkeypatch.setenv("OIDC_CLIENT_SECRET", "preferred-client-secret")
-    monkeypatch.setenv("MCP_JWT_SIGNING_KEY", "should-be-ignored")
-
-    real_derive = storage_module.derive_jwt_key
-    captured: list[str] = []
-
-    def spy(*, high_entropy_material: str, salt: str) -> bytes:
-        captured.append(high_entropy_material)
-        return real_derive(high_entropy_material=high_entropy_material, salt=salt)
-
-    monkeypatch.setattr(storage_module, "derive_jwt_key", spy)
-
-    build_oauth_storage()
-
-    assert captured == ["preferred-client-secret"]
+# Precedence (OIDC_CLIENT_SECRET wins over MCP_JWT_SIGNING_KEY) is verified
+# directly against moneta_mcp_auth in
+# tests/test_storage.py::test_first_listed_key_material_env_wins. The patch
+# point lives there (the call site is in moneta now), so duplicating the spy
+# here would patch the wrong module.

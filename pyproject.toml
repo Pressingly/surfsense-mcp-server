@@ -17,10 +17,21 @@ dependencies = [
     "starlette>=0.37.0",
     "uvicorn>=0.30.0",
     # Adds the Valkey GLIDE backend so HTTP-mode OAuth state can be stored
-    # outside the container filesystem (see surfsense_mcp/auth/storage.py).
+    # outside the container filesystem (see moneta_mcp_auth.storage).
     # Pin matches FastMCP's transitive py-key-value-aio constraint.
     "py-key-value-aio[valkey]>=0.4.4,<0.5.0",
+    # Shared Cognito/OAuth building blocks. Tag is pinned for prod/CI;
+    # the devstack docker-compose.dev.yml bind-mounts ../moneta-mcp-auth
+    # and editable-installs over this wheel for fast local iteration.
+    "moneta-mcp-auth @ git+https://github.com/Pressingly/moneta-mcp-auth.git@main",
 ]
+
+# Local-path override for dev: when ../moneta-mcp-auth/ is sibling-cloned
+# (the Moneta devstack convention), uv installs from source instead of
+# fetching the git URL. uv strips this section from published artifacts,
+# so end-users (pip install / uvx) still get the git URL dep.
+[tool.uv.sources]
+moneta-mcp-auth = { path = "../moneta-mcp-auth", editable = true }
 
 [project.optional-dependencies]
 dev = [

@@ -283,7 +283,7 @@ async def test_http_request_raises_when_username_missing(monkeypatch):
     )
     reset = _set_request_token(token_without_username)
     try:
-        with pytest.raises(RuntimeError, match="username claim missing"):
+        with pytest.raises(RuntimeError, match="'username' claim missing"):
             await client_module.authed_request("GET", "/api/v1/searchspaces")
     finally:
         _reset_request_token(reset)

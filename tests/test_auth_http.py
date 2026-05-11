@@ -59,13 +59,13 @@ def test_username_header_raises_when_username_missing() -> None:
     """Missing claim is a hard error — silently sending no header would let
     the backend auto-provision under the wrong identity."""
     token = _make_token({"sub": "abc-1234"})
-    with pytest.raises(RuntimeError, match="username claim missing"):
+    with pytest.raises(RuntimeError, match="'username' claim missing"):
         http_auth.username_header(token)
 
 
 def test_username_header_raises_when_username_empty_string() -> None:
     token = _make_token({"sub": "abc-1234", "username": ""})
-    with pytest.raises(RuntimeError, match="username claim missing"):
+    with pytest.raises(RuntimeError, match="'username' claim missing"):
         http_auth.username_header(token)
 
 
@@ -74,13 +74,13 @@ def test_username_header_raises_when_username_wrong_type() -> None:
     list) should raise rather than coerce — the wrong type usually means a
     pool-config problem the operator needs to fix."""
     token = _make_token({"sub": "abc-1234", "username": ["alice"]})
-    with pytest.raises(RuntimeError, match="username claim missing"):
+    with pytest.raises(RuntimeError, match="'username' claim missing"):
         http_auth.username_header(token)
 
 
 def test_username_header_raises_when_claims_dict_empty() -> None:
     token = _make_token({})
-    with pytest.raises(RuntimeError, match="username claim missing"):
+    with pytest.raises(RuntimeError, match="'username' claim missing"):
         http_auth.username_header(token)
 
 

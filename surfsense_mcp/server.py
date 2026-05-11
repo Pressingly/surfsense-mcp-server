@@ -7,6 +7,7 @@ import os
 from fastmcp import FastMCP
 from fastmcp.server.middleware.logging import StructuredLoggingMiddleware
 from mcp.types import Icon
+from moneta_mcp_auth.redirects import parse_allowed_client_redirect_uris
 
 from surfsense_mcp.tools import register_tools
 
@@ -36,22 +37,17 @@ def _log_payloads_enabled() -> bool:
 
 
 def _allowed_client_redirect_uris() -> list[str]:
-    """Parse MCP_ALLOWED_CLIENT_REDIRECT_URIS (comma-separated).
+    """Parse MCP_ALLOWED_CLIENT_REDIRECT_URIS with surfsense's localhost defaults.
 
     Unset/empty → localhost defaults. Operators opt in to broader allow-lists
     by listing specific patterns — do not allow arbitrary redirect URIs, they
     let an attacker DCR-register a malicious client and exfiltrate user tokens
     once the user authorizes.
     """
-    raw = os.getenv("MCP_ALLOWED_CLIENT_REDIRECT_URIS", "").strip()
-    if not raw:
-        return list(_DEFAULT_ALLOWED_CLIENT_REDIRECT_URIS)
-
-    allowed_uris = [uri.strip() for uri in raw.split(",") if uri.strip()]
-    if not allowed_uris:
-        return list(_DEFAULT_ALLOWED_CLIENT_REDIRECT_URIS)
-
-    return allowed_uris
+    # parse_allowed_client_redirect_uris returns ``list[str]`` whenever
+    # ``defaults`` is non-empty — surfsense always passes localhost defaults,
+    # so the ``None`` branch is unreachable here.
+    return parse_allowed_client_redirect_uris(defaults=_DEFAULT_ALLOWED_CLIENT_REDIRECT_URIS) or []
 
 
 def get_header_mcp() -> FastMCP:
@@ -78,6 +74,9 @@ def get_header_mcp() -> FastMCP:
     """
     from fastmcp.server.auth.providers.aws import AWSCognitoProvider
 
+    # Imported via the local re-export module so tests that monkeypatch
+    # ``surfsense_mcp.auth.storage.build_oauth_storage`` still intercept this
+    # call site. The actual implementation lives in ``moneta_mcp_auth.storage``.
     from surfsense_mcp.auth.storage import build_oauth_storage
 
     client_secret = os.getenv("OIDC_CLIENT_SECRET", "")
