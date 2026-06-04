@@ -5,11 +5,13 @@ Two transports, three strategies (the HTTP transport branches on URL scheme):
 - **stdio** (single-user, on a developer's laptop) → ``Authorization: Bearer
   <surfsense-jwt>`` from ``SURFSENSE_JWT`` or the password fallback.
 - **http + HTTPS base URL** (call traverses Traefik + mPass) →
-  ``Authorization: Bearer <cognito-jwt>``; oauth2-proxy validates the JWT
-  against the Cognito JWKS and sets ``X-Auth-Request-User`` itself.
+  ``Authorization: Bearer <cognito-id-token>``; oauth2-proxy validates the JWT
+  against the Cognito JWKS and sets ``X-Auth-Request-Email`` itself. The
+  id_token (not the access token) is forwarded because only it carries the
+  ``email`` / ``cognito:username`` claims oauth2-proxy needs.
 - **http + HTTP base URL** (direct docker-network call, no Traefik) →
-  ``X-Auth-Request-User`` derived from the validated Cognito token's
-  ``username`` claim. The Cognito Bearer is *not* forwarded.
+  ``X-Auth-Request-Email`` derived from the id_token's ``email`` claim. The
+  Cognito Bearer is *not* forwarded.
 
 The dispatcher in :func:`build_auth_headers` picks based on whether a FastMCP
 HTTP request scope is active; the per-mode internals live in

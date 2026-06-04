@@ -1,11 +1,19 @@
-"""HTTP-mode auth: the validated Cognito username drives X-Auth-Request-User.
+"""HTTP-mode auth: id-token identity is relayed to the SurfSense backend.
 
-Contract: when an HTTP request reaches a tool, the Cognito access token (validated
-by FastMCP's ``AWSCognitoProvider`` via the pool's JWKS) lives at
-``get_access_token()`` and its filtered ``claims["username"]`` is forwarded to the
-SurfSense backend as ``X-Auth-Request-User``. No Bearer is sent on this leg — the
-MCP → SurfSense call goes direct on the docker network and relies on SurfSense's
-``ProxyAuthMiddleware`` to auto-provision the user from the header.
+Contract: when an HTTP request reaches a tool, the validated Cognito token lives
+at ``get_access_token()``. ``SurfSenseCognitoProvider`` has embedded the
+id_token's ``email`` / ``cognito:username`` (and the raw id_token) under
+``claims["upstream_claims"]``. The MCP → SurfSense relay then either:
+
+* HTTP base URL (direct docker network) → inject ``X-Auth-Request-Email`` from
+  the id_token email so SurfSense's ``ProxyAuthMiddleware`` provisions the same
+  user as the browser login; or
+* HTTPS base URL (through Traefik + mPass) → forward the id_token as a Bearer
+  for oauth2-proxy to validate and turn into the identity header itself.
+
+When no ``upstream_claims`` are present (older token / native Cognito user) the
+relay falls back to the access-token ``username`` claim — exercised by the two
+``*_fallback`` cases below.
 """
 
 from __future__ import annotations
@@ -31,12 +39,37 @@ def _reset_request_token(reset_token):
 
 @pytest.fixture
 def cognito_access_token() -> AccessToken:
+    """Token with no ``upstream_claims`` — exercises the native-user fallback."""
     return AccessToken(
         token="cognito-access-token-zzz",
         client_id="mcp-client",
         scopes=["openid"],
         expires_at=int(time.time() + 3600),
         claims={"sub": "abc-1234", "username": "alice"},
+    )
+
+
+@pytest.fixture
+def cognito_token_with_id_identity() -> AccessToken:
+    """Token carrying id-token identity, as ``SurfSenseCognitoProvider`` builds it.
+
+    The access-token ``username`` is the opaque federated-user UUID; the real
+    identity rides in ``upstream_claims`` (email + cognito:username + raw id_token).
+    """
+    return AccessToken(
+        token="cognito-access-token-zzz",
+        client_id="mcp-client",
+        scopes=["openid"],
+        expires_at=int(time.time() + 3600),
+        claims={
+            "sub": "09daf50c-c0a1-70ec-41e2-443a7270561c",
+            "username": "09daf50c-c0a1-70ec-41e2-443a7270561c",
+            "upstream_claims": {
+                "id_token": "the-id-token-jwt",
+                "email": "1020010000020127@askii.ai",
+                "cognito:username": "1020010000020127",
+            },
+        },
     )
 
 
@@ -51,8 +84,62 @@ def _install_mock_transport(monkeypatch, handler) -> None:
     monkeypatch.setattr(httpx.AsyncClient, "__init__", patched_init)
 
 
-async def test_http_request_injects_x_auth_request_user(monkeypatch, cognito_access_token):
-    """HTTP base URL → direct docker-network path: X-Auth-Request-User, no Bearer."""
+async def test_http_request_injects_email_from_id_token(monkeypatch, cognito_token_with_id_identity):
+    """HTTP base URL → direct docker-network path: X-Auth-Request-Email from the
+    id_token email (the user the browser login resolves), no Bearer."""
+    monkeypatch.setenv("SURFSENSE_BASE_URL", "http://surfsense-backend:8000")
+    monkeypatch.delenv("SURFSENSE_JWT", raising=False)
+
+    recorded: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorded.append(request)
+        return httpx.Response(200, json=[{"id": 1, "name": "default"}])
+
+    _install_mock_transport(monkeypatch, handler)
+
+    reset = _set_request_token(cognito_token_with_id_identity)
+    try:
+        response = await client_module.authed_request("GET", "/api/v1/searchspaces")
+    finally:
+        _reset_request_token(reset)
+
+    assert response.status_code == 200
+    req = recorded[0]
+    # The same email the web login keys on — NOT the opaque sub/username UUID.
+    assert req.headers["x-auth-request-email"] == "1020010000020127@askii.ai"
+    assert "x-auth-request-user" not in {k.lower() for k in req.headers}
+    assert "authorization" not in {k.lower() for k in req.headers}
+
+
+async def test_https_request_forwards_id_token_bearer(monkeypatch, cognito_token_with_id_identity):
+    """HTTPS base URL → Traefik+mPass path forwards the *id_token* (carries
+    email/cognito:username), not the access token, so oauth2-proxy resolves the
+    right user."""
+    monkeypatch.setenv("SURFSENSE_BASE_URL", "https://foss-research.local.moneta.dev")
+    monkeypatch.delenv("SURFSENSE_JWT", raising=False)
+
+    recorded: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorded.append(request)
+        return httpx.Response(200, json=[])
+
+    _install_mock_transport(monkeypatch, handler)
+
+    reset = _set_request_token(cognito_token_with_id_identity)
+    try:
+        await client_module.authed_request("GET", "/api/v1/searchspaces")
+    finally:
+        _reset_request_token(reset)
+
+    req = recorded[0]
+    assert req.headers["authorization"] == "Bearer the-id-token-jwt"
+    assert "x-auth-request-email" not in {k.lower() for k in req.headers}
+
+
+async def test_http_request_injects_username_fallback(monkeypatch, cognito_access_token):
+    """HTTP base URL, no id-token identity → fall back to access-token username."""
     monkeypatch.setenv("SURFSENSE_BASE_URL", "http://surfsense-backend:8000")
     monkeypatch.delenv("SURFSENSE_JWT", raising=False)
     # Tempt the password fallback path — HTTP mode must not touch it.
@@ -83,8 +170,9 @@ async def test_http_request_injects_x_auth_request_user(monkeypatch, cognito_acc
     assert "authorization" not in {k.lower() for k in req.headers}
 
 
-async def test_https_request_forwards_cognito_bearer(monkeypatch, cognito_access_token):
-    """HTTPS base URL → Traefik+mPass path: Bearer flows through, no X-Auth header.
+async def test_https_request_forwards_access_token_fallback(monkeypatch, cognito_access_token):
+    """HTTPS base URL, no id-token identity → fall back to forwarding the raw
+    access token. No X-Auth header is pre-injected.
 
     The MCP server must not pre-inject ``X-Auth-Request-User`` here because
     Traefik's ``strip-auth-headers`` middleware would clear it before mPass
@@ -261,8 +349,8 @@ def test_get_header_mcp_supports_public_cognito_client(monkeypatch):
     assert mcp.auth.client_id == "test-public-client-id"
 
 
-async def test_http_request_raises_when_username_missing(monkeypatch):
-    """An AccessToken with no username claim is a hard error, not a silent fallback."""
+async def test_http_request_raises_when_identity_missing(monkeypatch):
+    """An AccessToken with no resolvable identity is a hard error, not a silent fallback."""
     monkeypatch.setenv("SURFSENSE_BASE_URL", "http://surfsense-backend:8000")
     monkeypatch.delenv("SURFSENSE_JWT", raising=False)
 
@@ -283,7 +371,7 @@ async def test_http_request_raises_when_username_missing(monkeypatch):
     )
     reset = _set_request_token(token_without_username)
     try:
-        with pytest.raises(RuntimeError, match="username claim missing"):
+        with pytest.raises(RuntimeError, match="cannot identify"):
             await client_module.authed_request("GET", "/api/v1/searchspaces")
     finally:
         _reset_request_token(reset)

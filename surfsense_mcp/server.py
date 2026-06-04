@@ -70,27 +70,36 @@ def get_header_mcp() -> FastMCP:
     the SurfSense backend depends on ``SURFSENSE_BASE_URL`` (see
     :mod:`surfsense_mcp.auth.http`):
 
-    * HTTPS base URL → forward the validated Cognito Bearer untouched and let
-      oauth2-proxy / mPass validate it (against the same JWKS) and set
-      ``X-Auth-Request-User`` itself.
+    * HTTPS base URL → forward the upstream id_token through Traefik+mPass and
+      let oauth2-proxy validate it (against the same JWKS) and set
+      ``X-Auth-Request-Email`` / ``X-Auth-Request-User`` itself.
     * HTTP base URL → call SurfSense direct on the docker network and inject
-      ``X-Auth-Request-User`` from the validated token's ``username`` claim.
-    """
-    from fastmcp.server.auth.providers.aws import AWSCognitoProvider
+      ``X-Auth-Request-Email`` from the id_token's ``email`` claim.
 
+    Both paths rely on :class:`~surfsense_mcp.auth.cognito.SurfSenseCognitoProvider`
+    to surface the id_token's identity claims — the Cognito *access* token alone
+    carries no ``email`` and an opaque ``username`` for federated users, which
+    would resolve a different SurfSense account than the web login.
+    """
+    from surfsense_mcp.auth.cognito import SurfSenseCognitoProvider
     from surfsense_mcp.auth.storage import build_oauth_storage
 
     client_secret = os.getenv("OIDC_CLIENT_SECRET", "")
     jwt_signing_key = os.getenv("MCP_JWT_SIGNING_KEY") or None
 
-    provider = AWSCognitoProvider(
+    provider = SurfSenseCognitoProvider(
         user_pool_id=os.environ["COGNITO_USER_POOL_ID"],
         aws_region=os.environ["COGNITO_AWS_REGION"],
         client_id=os.environ["OIDC_CLIENT_ID"],
         client_secret=client_secret,
         base_url=os.environ["MCP_BASE_URL"],
         redirect_path="/auth/callback",
-        required_scopes=["openid"],
+        # `email` is required so the Cognito id_token carries the `email` claim
+        # that drives SurfSense identity (see auth/cognito.py); Cognito gates
+        # id_token claims by scope. Matches oauth2-proxy's `openid profile email`
+        # (docker-compose OAUTH2_PROXY_SCOPE) so the MCP and web flows resolve
+        # the same user from the same shared Cognito app client.
+        required_scopes=["openid", "email", "profile"],
         allowed_client_redirect_uris=_allowed_client_redirect_uris(),
         # Cognito User Pools don't honor RFC 8707 Resource Indicators the way
         # the spec requires — forwarding `resource` on /authorize without it
