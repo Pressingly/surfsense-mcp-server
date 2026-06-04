@@ -57,8 +57,8 @@ This is the more interesting layer. FastMCP's [`AWSCognitoProvider`](https://gof
 1. **Discovery** — the server publishes `/.well-known/oauth-authorization-server` (RFC 8414) and `/.well-known/oauth-protected-resource` (RFC 9728). MCP clients hit `/mcp`, get a `401 WWW-Authenticate: Bearer resource_metadata=…` challenge, and fetch the metadata.
 2. **DCR shim** — Cognito has no native [Dynamic Client Registration](https://datatracker.ietf.org/doc/html/rfc7591). The server's `/register` endpoint accepts MCP-client registrations and returns the *single, pre-registered* Cognito app client to all of them. So Claude Desktop, Cursor, MCP Inspector — every client looks like its own OAuth client to itself, but they all share the underlying Cognito client.
 3. **Authorization code flow with PKCE** — the server proxies `/authorize` → Cognito's hosted UI, captures the code at `/auth/callback`, exchanges it server-side at Cognito's `/oauth2/token` (with the confidential client secret, or PKCE-only when the Cognito client is public — `client_secret=""` is passed through and authlib handles the exchange without a Basic header), and returns the Cognito access token to the MCP client.
-4. **Bearer validation** — every `/mcp/*` request is Bearer-validated against the Cognito user pool's JWKS (no live calls to Cognito on the hot path).
-5. **Backend identity injection** — tools read the validated token's `username` claim and forward it as `X-Auth-Request-User` to the SurfSense backend on the internal docker network. SurfSense's `ProxyAuthMiddleware` reads the header, synthesizes `{username}@{SMB_NAME}.com` if no email is set, and auto-provisions/loads the user. **The Cognito Bearer is never forwarded** — identity on the MCP → backend leg is header-based, exactly like how oauth2-proxy injects identity for the web apps.
+4. **Bearer validation** — every `/mcp/*` request is Bearer-validated against the Cognito user pool's JWKS (no live calls to Cognito on the hot path). `SurfSenseCognitoProvider` also decodes the upstream **id_token** at token-exchange time and stashes its `email` / `cognito:username` under the FastMCP token's `upstream_claims`.
+5. **Backend identity injection** — how identity reaches SurfSense depends on `SURFSENSE_BASE_URL`'s scheme. On the **HTTP** (direct docker-network) shape, tools forward the id_token's `email` as `X-Auth-Request-Email`; SurfSense's `ProxyAuthMiddleware` reads it and auto-provisions/loads the user (the Cognito Bearer is never forwarded). On the **HTTPS** (through Traefik+mPass) shape, the id_token is forwarded as the Bearer and oauth2-proxy sets the identity header itself. Crucially it's the **id_token**, not the access token: a Cognito access token has no `email` claim and an opaque UUID `username` for federated users, so it would resolve a *different* SurfSense account than the web login.
 
 This means the MCP server is the only Moneta service that does *not* sit behind mPass (oauth2-proxy ForwardAuth) — MCP clients can't follow interactive OIDC redirects mid-stream, so we let FastMCP handle the full OAuth dance instead. The MCP → SurfSense leg also bypasses mPass: it goes direct on the docker network, with the trust boundary being the network itself (no host port published).
 
@@ -226,7 +226,9 @@ The fastest way to verify a fresh deploy. Inspector is `npx`-installed, runs loc
 
 - **`UNABLE_TO_VERIFY_LEAF_SIGNATURE` / `DEPTH_ZERO_SELF_SIGNED_CERT`** in MCP Inspector or other Node clients. The devstack uses a self-signed cert. Either install it system-wide or set `NODE_EXTRA_CA_CERTS=/path/to/foss-server-bundle-devstack/traefik/certs/local.crt` before launching the client.
 
-- **`401 Unauthorized` from `/mcp` after successful OAuth.** Almost always means the validated Cognito token is missing the `username` claim — check the user pool's `user_id_claim` setting and that `AWSCognitoProvider`'s claim filter is in use (it's the default).
+- **`401 Unauthorized` from `/mcp` after successful OAuth.** Almost always means the inbound Cognito Bearer failed JWKS validation — check the user pool / region / client-id config and that `SurfSenseCognitoProvider` (subclass of `AWSCognitoProvider`) is in use.
+
+- **A *different* SurfSense user is created/loaded than your web login** (e.g. a UUID-named account like `09daf50c-…@askii.ai` instead of `1020010000020127@askii.ai`). The relay is identifying you by the Cognito **access token** (no `email`, opaque `username`) instead of the **id_token**. Confirm `get_header_mcp()` builds `SurfSenseCognitoProvider` (not the stock `AWSCognitoProvider`) so `_extract_upstream_claims` captures the id_token, and that the Cognito client returns an id_token (the `openid` scope is requested). Logs will show a `No upstream id_token` warning when this is misconfigured.
 
 - **`Cognito username claim missing on validated token`** in MCP server logs. Same root cause as above; the server raises here rather than silently sending a header with no value.
 
@@ -289,6 +291,6 @@ uv run --with coverage --with pytest-cov pytest \
 uv sync --extra dev --upgrade-package fastmcp
 ```
 
-Tests use an in-memory `httpx.MockTransport` fixture — no running SurfSense instance required. The HTTP-mode auth path (Cognito Bearer → `X-Auth-Request-User` injection) is covered separately by `tests/test_http_mode_auth.py`, which also stubs the OIDC discovery doc so the suite never hits the real Cognito service.
+Tests use an in-memory `httpx.MockTransport` fixture — no running SurfSense instance required. The HTTP-mode auth path (id_token → `X-Auth-Request-Email` injection / id_token Bearer forwarding) is covered by `tests/test_http_mode_auth.py` and `tests/test_auth_http.py`; the id_token claim capture is covered by `tests/test_auth_cognito.py`. These also stub the OIDC discovery doc so the suite never hits the real Cognito service.
 
 See `CLAUDE.md` for tool conventions, FastMCP version notes, and constraints when adding new tools.
