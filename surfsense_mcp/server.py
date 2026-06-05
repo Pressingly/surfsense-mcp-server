@@ -54,6 +54,24 @@ def _allowed_client_redirect_uris() -> list[str]:
     return allowed_uris
 
 
+def _required_scopes() -> list[str]:
+    """OAuth scopes requested upstream from Cognito (space- or comma-separated).
+
+    Default is ``openid`` only. Cognito already includes the user's readable
+    attributes — crucially ``email`` and ``cognito:username`` — in the **id_token**
+    of the authorization-code flow with just ``openid``, which is all the SurfSense
+    identity relay needs (see ``auth/cognito.py``). Requesting ``email`` / ``profile``
+    additionally is **not** required and fails with ``invalid_scope`` unless those
+    OAuth scopes are explicitly enabled on the Cognito app client. Operators whose
+    client does enable them can opt in via ``MCP_OIDC_SCOPES="openid email profile"``.
+    """
+    raw = os.getenv("MCP_OIDC_SCOPES", "").strip()
+    if not raw:
+        return ["openid"]
+    scopes = [s.strip() for s in raw.replace(",", " ").split() if s.strip()]
+    return scopes or ["openid"]
+
+
 def get_header_mcp() -> FastMCP:
     """HTTP mode — FastMCP is the sole auth layer (mPass is NOT in front).
 
@@ -94,12 +112,11 @@ def get_header_mcp() -> FastMCP:
         client_secret=client_secret,
         base_url=os.environ["MCP_BASE_URL"],
         redirect_path="/auth/callback",
-        # `email` is required so the Cognito id_token carries the `email` claim
-        # that drives SurfSense identity (see auth/cognito.py); Cognito gates
-        # id_token claims by scope. Matches oauth2-proxy's `openid profile email`
-        # (docker-compose OAUTH2_PROXY_SCOPE) so the MCP and web flows resolve
-        # the same user from the same shared Cognito app client.
-        required_scopes=["openid", "email", "profile"],
+        # `openid` only by default — Cognito puts email / cognito:username in the
+        # id_token without the email/profile OAuth scopes, and requesting those
+        # against a client that doesn't enable them fails with invalid_scope.
+        # Override via MCP_OIDC_SCOPES if the app client allows more (see helper).
+        required_scopes=_required_scopes(),
         allowed_client_redirect_uris=_allowed_client_redirect_uris(),
         # Cognito User Pools don't honor RFC 8707 Resource Indicators the way
         # the spec requires — forwarding `resource` on /authorize without it

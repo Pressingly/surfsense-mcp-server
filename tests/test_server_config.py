@@ -11,7 +11,35 @@ from __future__ import annotations
 
 import pytest
 
-from surfsense_mcp.server import _log_payloads_enabled
+from surfsense_mcp.server import _log_payloads_enabled, _required_scopes
+
+
+def test_required_scopes_default_openid_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default must be openid only — requesting email/profile against a Cognito
+    app client that doesn't enable them fails the OAuth flow with invalid_scope."""
+    monkeypatch.delenv("MCP_OIDC_SCOPES", raising=False)
+    assert _required_scopes() == ["openid"]
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_required_scopes_blank_falls_back_to_openid(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("MCP_OIDC_SCOPES", value)
+    assert _required_scopes() == ["openid"]
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("openid email profile", ["openid", "email", "profile"]),
+        ("openid,email,profile", ["openid", "email", "profile"]),
+        ("  openid ,  email ", ["openid", "email"]),
+    ],
+)
+def test_required_scopes_parses_space_or_comma(
+    monkeypatch: pytest.MonkeyPatch, value: str, expected: list[str]
+) -> None:
+    monkeypatch.setenv("MCP_OIDC_SCOPES", value)
+    assert _required_scopes() == expected
 
 
 def test_log_payloads_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
