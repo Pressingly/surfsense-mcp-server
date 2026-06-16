@@ -24,7 +24,7 @@ surfsense-mcp-server/
 │   │   ├── stdio.py                       # SURFSENSE_JWT / password fallback / cache
 │   │   ├── http.py                        # AccessToken → X-Auth-Request-Email / id_token Bearer
 │   │   ├── cognito.py                     # SurfSenseCognitoProvider: id_token claims → upstream_claims
-│   │   └── storage.py                     # MCP_OAUTH_STORAGE_URL → ValkeyStore + Fernet
+│   │   └── storage.py                     # MCP_OAUTH_STORAGE_URL → RedisStore + Fernet
 │   └── tools/
 │       ├── __init__.py                    # register_tools(mcp) — calls all per-module register fns
 │       ├── search_spaces.py               # list / get / create / update / delete
@@ -133,7 +133,7 @@ No manual Bearer paste and no Cognito client config needed on the MCP client sid
 `AWSCognitoProvider` (via `OAuthProxy`) keeps six collections of OAuth state — DCR client registrations, in-flight authorize transactions, authorization codes, upstream Cognito access/refresh tokens, JTI mappings, and refresh-token metadata. Two backends:
 
 - **Default — encrypted file tree** under `~/.local/share/fastmcp/oauth-proxy/<fingerprint>/` inside the container. Survives `docker compose restart`, but `docker compose down && up` recreates the container's writable layer and wipes everything → every MCP client re-OAuths on next call. Single-replica only.
-- **Production — Valkey/Redis** (`MCP_OAUTH_STORAGE_URL=redis://valkey:6379/<db>`). `auth/storage.py:build_oauth_storage()` parses the URL, constructs a `ValkeyStore`, and wraps it in `FernetEncryptionWrapper` keyed off `OIDC_CLIENT_SECRET` (preferred — confidential clients) or `MCP_JWT_SIGNING_KEY` (fallback — public/PKCE clients). The same HKDF derivation FastMCP uses for the file store, so on-disk RDB never carries plaintext. State survives container recreation; multi-replica works as long as all replicas point at the same instance.
+- **Production — Redis/Valkey** (`MCP_OAUTH_STORAGE_URL=redis://valkey:6379/<db>` for plain in-cluster Valkey, or `rediss://<host>:<port>/<db>?ssl_cert_reqs=none` for a TLS-only managed instance such as GCP Memorystore). `auth/storage.py:build_oauth_storage()` validates the URL, builds a redis-py client via `redis.asyncio.Redis.from_url` (so the `rediss://` scheme and `ssl_cert_reqs` query param survive — `RedisStore(url=...)` would discard them and silently downgrade to plaintext), hands it to `RedisStore(client=...)`, and wraps that in `FernetEncryptionWrapper` keyed off `OIDC_CLIENT_SECRET` (preferred — confidential clients) or `MCP_JWT_SIGNING_KEY` (fallback — public/PKCE clients). The same HKDF derivation FastMCP uses for the file store, so on-disk RDB never carries plaintext. `valkey://` / `valkeys://` are accepted as aliases (normalised to `redis://` / `rediss://`). State survives container recreation; multi-replica works as long as all replicas point at the same instance.
 
 In the Moneta devstack the compose file always sets `MCP_OAUTH_STORAGE_URL=redis://valkey:6379/11` so the backend is Valkey by default. `__main__.py:warn_if_storage_missing_in_production()` logs a warning when `MCP_ENV=production` and the URL is unset; we don't hard-fail because evaluation/local runs of the image should still come up.
 
