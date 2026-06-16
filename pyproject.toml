@@ -20,10 +20,13 @@ dependencies = [
     "pyjwt>=2.0.0",
     "starlette>=0.37.0",
     "uvicorn>=0.30.0",
-    # Adds the Valkey GLIDE backend so HTTP-mode OAuth state can be stored
+    # Adds the redis-py backend so HTTP-mode OAuth state can be stored
     # outside the container filesystem (see surfsense_mcp/auth/storage.py).
+    # The [redis] extra (not [valkey]/GLIDE) is required because the store
+    # is built from a redis-py client that speaks TLS (rediss://) — GLIDE's
+    # py-key-value-aio wrapper cannot reach the TLS-only Memorystore on GKE.
     # Pin matches FastMCP's transitive py-key-value-aio constraint.
-    "py-key-value-aio[valkey]>=0.4.4,<0.5.0",
+    "py-key-value-aio[redis]>=0.4.4,<0.5.0",
 ]
 
 [project.optional-dependencies]

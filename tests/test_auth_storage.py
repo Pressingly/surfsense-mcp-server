@@ -2,9 +2,9 @@
 
 Two layers under test:
 
-- :func:`parse_storage_url` — pure-Python URL parsing. No I/O, no GLIDE.
-- :func:`build_oauth_storage` — env-var dispatch + Fernet wrap. The Valkey
-  GLIDE client is imported lazily so the unset-env and missing-key-material
+- :func:`parse_storage_url` — pure-Python URL parsing. No I/O, no client.
+- :func:`build_oauth_storage` — env-var dispatch + Fernet wrap. The redis-py
+  client is imported lazily so the unset-env and missing-key-material
   branches don't require it.
 """
 
@@ -17,7 +17,7 @@ from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
 
 from surfsense_mcp.auth import storage as storage_module
 from surfsense_mcp.auth.storage import (
-    ValkeyConfig,
+    RedisConfig,
     build_oauth_storage,
     parse_storage_url,
 )
@@ -29,14 +29,32 @@ from surfsense_mcp.auth.storage import (
 
 def test_parse_redis_full_url():
     config = parse_storage_url("redis://valkey:6379/11")
-    assert config == ValkeyConfig(host="valkey", port=6379, db=11, username=None, password=None)
+    assert config == RedisConfig(url="redis://valkey:6379/11", host="valkey", port=6379, db=11)
 
 
-def test_parse_valkey_scheme_equivalent_to_redis():
+def test_parse_valkey_scheme_normalised_to_redis():
     config = parse_storage_url("valkey://localhost:6379/3")
     assert config.host == "localhost"
     assert config.port == 6379
     assert config.db == 3
+    # ``valkey://`` is rewritten to ``redis://`` so redis-py's from_url accepts it.
+    assert config.url == "redis://localhost:6379/3"
+
+
+def test_parse_rediss_scheme_preserves_tls_and_query_string():
+    """The TLS scheme and ``ssl_cert_reqs`` query param must survive parsing —
+    this is the whole point of building the client from the raw URL.
+    """
+    config = parse_storage_url("rediss://memorystore:6378/11?ssl_cert_reqs=none")
+    assert config.url == "rediss://memorystore:6378/11?ssl_cert_reqs=none"
+    assert config.host == "memorystore"
+    assert config.port == 6378
+    assert config.db == 11
+
+
+def test_parse_valkeys_scheme_normalised_to_rediss():
+    config = parse_storage_url("valkeys://memorystore:6378/11?ssl_cert_reqs=none")
+    assert config.url == "rediss://memorystore:6378/11?ssl_cert_reqs=none"
 
 
 def test_parse_defaults_port_and_db_when_omitted():
@@ -45,14 +63,14 @@ def test_parse_defaults_port_and_db_when_omitted():
     assert config.db == 0
 
 
-def test_parse_extracts_username_and_password():
+def test_parse_extracts_userinfo_into_url():
     config = parse_storage_url("redis://user:secret@valkey:6379/2")
-    assert config.username == "user"
-    assert config.password == "secret"
+    assert config.url == "redis://user:secret@valkey:6379/2"
+    assert config.host == "valkey"
 
 
 def test_parse_rejects_non_redis_scheme():
-    with pytest.raises(ValueError, match="redis:// or valkey://"):
+    with pytest.raises(ValueError, match="redis://, rediss://, valkey:// or valkeys://"):
         parse_storage_url("https://valkey:6379/11")
 
 
@@ -102,15 +120,15 @@ def test_raises_when_no_key_material_set(monkeypatch):
         build_oauth_storage()
 
 
-def test_builds_fernet_wrapped_valkey_store_from_client_secret(monkeypatch):
+def test_builds_fernet_wrapped_redis_store_from_client_secret(monkeypatch):
     """Confidential-client path: only OIDC_CLIENT_SECRET set.
 
-    Skips when the Valkey GLIDE client isn't installed (uv install without
-    the [valkey] extra). This branch is exercised in CI / dev images.
+    Skips when the redis-py client isn't installed (uv install without
+    the [redis] extra). This branch is exercised in CI / dev images.
     """
-    pytest.importorskip("glide")
-    valkey_module = importlib.import_module("key_value.aio.stores.valkey")
-    valkey_store_cls = valkey_module.ValkeyStore
+    pytest.importorskip("redis")
+    redis_module = importlib.import_module("key_value.aio.stores.redis")
+    redis_store_cls = redis_module.RedisStore
 
     monkeypatch.setenv("MCP_OAUTH_STORAGE_URL", "redis://valkey:6379/11")
     monkeypatch.setenv("OIDC_CLIENT_SECRET", "test-client-secret")
@@ -119,14 +137,14 @@ def test_builds_fernet_wrapped_valkey_store_from_client_secret(monkeypatch):
     store = build_oauth_storage()
 
     assert isinstance(store, FernetEncryptionWrapper)
-    assert isinstance(store.key_value, valkey_store_cls)
+    assert isinstance(store.key_value, redis_store_cls)
 
 
-def test_builds_fernet_wrapped_valkey_store_from_jwt_signing_key(monkeypatch):
+def test_builds_fernet_wrapped_redis_store_from_jwt_signing_key(monkeypatch):
     """Public-client path: only MCP_JWT_SIGNING_KEY set."""
-    pytest.importorskip("glide")
-    valkey_module = importlib.import_module("key_value.aio.stores.valkey")
-    valkey_store_cls = valkey_module.ValkeyStore
+    pytest.importorskip("redis")
+    redis_module = importlib.import_module("key_value.aio.stores.redis")
+    redis_store_cls = redis_module.RedisStore
 
     monkeypatch.setenv("MCP_OAUTH_STORAGE_URL", "redis://valkey:6379/11")
     monkeypatch.delenv("OIDC_CLIENT_SECRET", raising=False)
@@ -135,7 +153,38 @@ def test_builds_fernet_wrapped_valkey_store_from_jwt_signing_key(monkeypatch):
     store = build_oauth_storage()
 
     assert isinstance(store, FernetEncryptionWrapper)
-    assert isinstance(store.key_value, valkey_store_cls)
+    assert isinstance(store.key_value, redis_store_cls)
+
+
+def test_tls_url_passed_verbatim_to_from_url(monkeypatch):
+    """Regression guard for the ``RedisStore(url=...)`` trap: the rediss://
+    scheme and ``ssl_cert_reqs=none`` query param must reach redis-py's
+    ``from_url`` intact, otherwise the connection silently downgrades to
+    plaintext and the TLS-only Memorystore refuses it.
+    """
+    pytest.importorskip("redis")
+    redis_asyncio = importlib.import_module("redis.asyncio")
+
+    monkeypatch.setenv("MCP_OAUTH_STORAGE_URL", "rediss://memorystore:6378/11?ssl_cert_reqs=none")
+    monkeypatch.setenv("OIDC_CLIENT_SECRET", "test-client-secret")
+    monkeypatch.delenv("MCP_JWT_SIGNING_KEY", raising=False)
+
+    captured: list[tuple] = []
+    real_from_url = redis_asyncio.Redis.from_url
+
+    def spy(url, *args, **kwargs):
+        captured.append((url, kwargs))
+        return real_from_url(url, *args, **kwargs)
+
+    monkeypatch.setattr(redis_asyncio.Redis, "from_url", spy)
+
+    store = build_oauth_storage()
+
+    assert isinstance(store, FernetEncryptionWrapper)
+    assert captured, "Redis.from_url was not called"
+    url, kwargs = captured[0]
+    assert url == "rediss://memorystore:6378/11?ssl_cert_reqs=none"
+    assert kwargs.get("decode_responses") is True
 
 
 def test_client_secret_takes_precedence_over_jwt_signing_key(monkeypatch):
@@ -143,7 +192,7 @@ def test_client_secret_takes_precedence_over_jwt_signing_key(monkeypatch):
     is the typical prod setup; the signing key is the sandbox/public fallback).
     Spy on derive_jwt_key to record the material fed into HKDF.
     """
-    pytest.importorskip("glide")
+    pytest.importorskip("redis")
 
     monkeypatch.setenv("MCP_OAUTH_STORAGE_URL", "redis://valkey:6379/11")
     monkeypatch.setenv("OIDC_CLIENT_SECRET", "preferred-client-secret")
