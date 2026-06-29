@@ -35,6 +35,21 @@ Chat (streaming):
 |---|---|
 | `query_surfsense` | Ask SurfSense a natural-language question. Streams over SSE from `POST /api/v1/new_chat`, creates a thread on demand, returns the concatenated answer + thread id. Subsumes summarize / compare / extract / quick_research / deep_research — just ask. |
 
+Discovery (always registered):
+
+| Tool | Description |
+|---|---|
+| `list_available_tools` | List ALL available tools grouped by category, showing which are currently enabled. |
+| `enable_tools` | Dynamically enable additional tools by name at runtime. |
+
+### Tool discovery
+
+Only 5 tools are registered on startup by default: `list_search_spaces`, `search_documents`, `query_surfsense`, `list_research_threads`, and `get_document`. The two discovery meta tools (`list_available_tools` and `enable_tools`) are always available.
+
+To access additional tools, call `list_available_tools` to see the full catalog (28 tools across 6 categories), then call `enable_tools` with the names you need. This keeps the default tool surface small while making the full catalog discoverable.
+
+Override the default set with the `SURFSENSE_MCP_ENABLED_TOOLS` environment variable (comma-separated tool names).
+
 ## Transport modes
 
 The server supports two transports. Pick the one that matches how you're running it.
@@ -250,6 +265,7 @@ The fastest way to verify a fresh deploy. Inspector is `npx`-installed, runs loc
 | `MCP_ENV` | optional | http | `production` triggers warnings when `MCP_ALLOWED_ORIGINS` is unset/`*` or `MCP_OAUTH_STORAGE_URL` is unset. Default `development`. |
 | `MCP_ALLOWED_ORIGINS` | optional | http | Comma-separated CORS origins. Default `*`. |
 | `MCP_LOG_LEVEL` | optional | both | `DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL` (case-insensitive). Unset → derived from `MCP_ENV`: `production` → `INFO`, anything else → `DEBUG`. Bogus values warn at startup and fall through to the env-derived default. |
+| `SURFSENSE_MCP_ENABLED_TOOLS` | optional | both | Comma-separated list of tool names to enable on startup. Overrides the default 5-tool set. Unset or empty enables the defaults; the two discovery meta tools are always registered regardless. |
 | `MCP_LOG_PAYLOADS` | optional | both | When truthy (`1`/`true`/`yes`/`on`), the structured-logging middleware includes tool request/response payloads. Default off — payloads can include chat prompts, document bodies, and base64 uploads. Useful for short debugging windows only. |
 
 ## Deployment in `foss-server-bundle-devstack`

@@ -816,3 +816,95 @@ async def test_password_login_retries_once_on_401(mock_transport, monkeypatch: p
     assert data["id"] == 99
     assert login_counter["n"] == 2
     assert api_counter["n"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Tool discovery — list_available_tools / enable_tools
+# ---------------------------------------------------------------------------
+
+
+async def test_list_available_tools_returns_all_categories(mock_transport) -> None:
+    """list_available_tools returns the full catalog grouped by category."""
+    mock_transport(lambda req: json_response({}))
+    data = await _call_tool("list_available_tools", {})
+    assert data["total_tools"] == 28
+    assert set(data["categories"].keys()) == {
+        "Search Spaces",
+        "Documents",
+        "Research Threads",
+        "Reports",
+        "Notes",
+        "Logs",
+    }
+    # Every tool should be enabled because _env sets ALL_TOOL_NAMES.
+    assert data["enabled_count"] == 28
+
+
+async def test_default_tools_only_when_env_unset(monkeypatch, mock_transport) -> None:
+    """Without SURFSENSE_MCP_ENABLED_TOOLS, only the 5 defaults + meta tools are registered."""
+    monkeypatch.delenv("SURFSENSE_MCP_ENABLED_TOOLS", raising=False)
+    mock_transport(lambda req: json_response({}))
+
+    mcp = get_stdio_mcp()
+    async with Client(mcp) as client:
+        tools = await client.list_tools()
+
+    tool_names = {t.name for t in tools}
+    from surfsense_mcp.tools import DEFAULT_TOOLS, META_TOOLS
+
+    assert tool_names == DEFAULT_TOOLS | META_TOOLS
+
+
+async def test_enable_tools_registers_new_tool(monkeypatch, mock_transport) -> None:
+    """enable_tools dynamically registers a previously disabled tool."""
+    monkeypatch.delenv("SURFSENSE_MCP_ENABLED_TOOLS", raising=False)
+    mock_transport(lambda req: json_response({"id": 7, "name": "research"}))
+
+    mcp = get_stdio_mcp()
+    async with Client(mcp) as client:
+        # get_search_space should not be available yet.
+        tools_before = {t.name for t in await client.list_tools()}
+        assert "get_search_space" not in tools_before
+
+        # Enable it.
+        result = await client.call_tool("enable_tools", {"tool_names": ["get_search_space"]})
+        enable_data = json.loads(result.content[0].text)
+        assert enable_data["newly_enabled"] == ["get_search_space"]
+
+        # Now it should be callable.
+        result = await client.call_tool("get_search_space", {"search_space_id": 7})
+        data = json.loads(result.content[0].text)
+        assert data["id"] == 7
+
+
+async def test_enable_tools_already_enabled(mock_transport) -> None:
+    """enable_tools reports already-enabled tools without re-registering."""
+    mock_transport(lambda req: json_response({}))
+    data = await _call_tool("enable_tools", {"tool_names": ["list_search_spaces", "nonexistent_tool"]})
+    assert "list_search_spaces" in data["already_enabled"]
+    assert "nonexistent_tool" in data["unknown"]
+    assert data["newly_enabled"] == []
+
+
+async def test_list_available_tools_marks_enabled_correctly(monkeypatch, mock_transport) -> None:
+    """list_available_tools reflects which tools are enabled vs disabled."""
+    monkeypatch.delenv("SURFSENSE_MCP_ENABLED_TOOLS", raising=False)
+    mock_transport(lambda req: json_response({}))
+
+    mcp = get_stdio_mcp()
+    async with Client(mcp) as client:
+        result = await client.call_tool("list_available_tools", {})
+        data = json.loads(result.content[0].text)
+
+    assert data["enabled_count"] == 5
+    assert data["total_tools"] == 28
+
+    # Verify the default tools are marked enabled.
+    from surfsense_mcp.tools import DEFAULT_TOOLS
+
+    for cat_tools in data["categories"].values():
+        for tool in cat_tools:
+            if tool["name"] in DEFAULT_TOOLS:
+                assert tool["enabled"] is True
+            else:
+                assert tool["enabled"] is False

@@ -11,12 +11,47 @@ import pytest
 FAKE_BASE_URL = "https://surfsense.test"
 FAKE_JWT = "test-jwt-token"
 
+# All tool names — set in _env so existing tests have every tool available.
+ALL_TOOL_NAMES = ",".join(
+    [
+        "list_search_spaces",
+        "get_search_space",
+        "create_search_space",
+        "update_search_space",
+        "delete_search_space",
+        "list_documents",
+        "search_documents",
+        "get_document",
+        "get_recent_documents",
+        "upload_document",
+        "upload_document_content",
+        "update_document",
+        "delete_document",
+        "get_document_status",
+        "get_document_type_counts",
+        "list_research_threads",
+        "get_research_thread",
+        "delete_research_thread",
+        "get_thread_messages",
+        "query_surfsense",
+        "list_reports",
+        "get_report",
+        "get_report_content",
+        "export_report",
+        "delete_report",
+        "create_note",
+        "delete_note",
+        "get_logs",
+    ]
+)
+
 
 @pytest.fixture(autouse=True)
 def _env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Set the env vars the client layer requires and reset auth caches."""
     monkeypatch.setenv("SURFSENSE_BASE_URL", FAKE_BASE_URL)
     monkeypatch.setenv("SURFSENSE_JWT", FAKE_JWT)
+    monkeypatch.setenv("SURFSENSE_MCP_ENABLED_TOOLS", ALL_TOOL_NAMES)
     # Make sure no leftover email/password creds from a prior test leak in.
     monkeypatch.delenv("SURFSENSE_EMAIL", raising=False)
     monkeypatch.delenv("SURFSENSE_PASSWORD", raising=False)
@@ -61,7 +96,7 @@ def json_response(payload: object, status_code: int = 200) -> httpx.Response:
 
 
 # Make fixtures importable from test modules.
-__all__ = ["FAKE_BASE_URL", "FAKE_JWT", "json_response", "mock_transport"]
+__all__ = ["ALL_TOOL_NAMES", "FAKE_BASE_URL", "FAKE_JWT", "json_response", "mock_transport"]
 
 # Guard against a stray SURFSENSE_JWT in the developer's shell.
 if "SURFSENSE_JWT" in os.environ and os.environ.get("SURFSENSE_JWT") != FAKE_JWT:
