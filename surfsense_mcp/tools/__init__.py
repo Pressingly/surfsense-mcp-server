@@ -139,32 +139,36 @@ def _register_meta_tools(mcp: FastMCP) -> None:
     async def list_available_tools() -> dict[str, Any]:
         """List ALL available SurfSense MCP tools grouped by category.
 
-        Returns the full catalog of tools with their names, descriptions, and
-        whether they are currently enabled.  Use ``enable_tools`` to activate
-        additional tools at runtime.
+        Returns the full catalog of tools. Tools with enabled=false ARE
+        available — call enable_tools(tool_names=[...]) to activate them
+        before use.
         """
         assert _catalog is not None
         categories: dict[str, list[dict[str, Any]]] = {}
         for entry in _catalog.entries.values():
-            categories.setdefault(entry.category, []).append(
-                {
-                    "name": entry.name,
-                    "description": entry.description,
-                    "enabled": entry.enabled,
-                }
-            )
+            tool_info: dict[str, Any] = {
+                "name": entry.name,
+                "description": entry.description,
+                "enabled": entry.enabled,
+            }
+            if not entry.enabled:
+                tool_info["action"] = "call enable_tools to activate"
+            categories.setdefault(entry.category, []).append(tool_info)
+
+        enabled_count = sum(1 for e in _catalog.entries.values() if e.enabled)
+        not_enabled_count = len(_catalog.entries) - enabled_count
         return {
             "total_tools": len(_catalog.entries),
-            "enabled_count": sum(1 for e in _catalog.entries.values() if e.enabled),
+            "enabled_count": enabled_count,
+            "not_yet_enabled_count": not_enabled_count,
+            "how_to_activate": "call enable_tools(tool_names=[...]) to activate any not-yet-enabled tool",
             "categories": categories,
         }
 
     @mcp.tool()
     async def enable_tools(tool_names: list[str]) -> dict[str, Any]:
-        """Dynamically enable additional SurfSense MCP tools by name.
-
-        Previously disabled tools are registered so they become callable.
-        Already-enabled tools are reported but not re-registered.
+        """REQUIRED before using any non-default tool. Activates additional
+        SurfSense tools by name so you can call them.
 
         Args:
             tool_names: List of tool names to enable (from ``list_available_tools``).
