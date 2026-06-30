@@ -12,6 +12,19 @@ from surfsense_mcp.tools import register_tools
 
 ICON = Icon(src="https://surfsense.net/favicon.ico", alt="SurfSense MCP Server")
 
+_INSTRUCTIONS = (
+    "Manages search spaces, documents, research threads, reports, notes, and "
+    "logs in SurfSense, an AI research platform.\n\n"
+    "Tool discovery: only a small default set of tools is enabled on startup. "
+    "If the current tools cannot fulfill a request, call list_available_tools "
+    "to see the full catalog of available tools (document management, reports, "
+    "notes, logs, etc.), then call enable_tools to activate the ones you need "
+    "before using them.\n\n"
+    "Getting started: use list_search_spaces to discover available search "
+    "spaces, then search_documents or query_surfsense to find and interact "
+    "with content."
+)
+
 # Default — covers Claude Desktop, Cursor, and MCP Inspector on a developer
 # laptop. Non-localhost MCP clients (e.g. the Askii AI app) must be added via
 # MCP_ALLOWED_CLIENT_REDIRECT_URIS to register at /register (DCR shim).
@@ -134,6 +147,7 @@ def get_header_mcp() -> FastMCP:
 
     mcp = FastMCP(
         "SurfSense MCP Server (http)",
+        instructions=_INSTRUCTIONS,
         icons=[ICON],
         website_url="https://surfsense.net",
         auth=provider,
@@ -150,7 +164,7 @@ def get_stdio_mcp() -> FastMCP:
     or fall back to the email/password login flow provided by
     ``surfsense_mcp.auth.stdio``.
     """
-    mcp = FastMCP("SurfSense MCP Server (stdio)", icons=[ICON])
+    mcp = FastMCP("SurfSense MCP Server (stdio)", instructions=_INSTRUCTIONS, icons=[ICON])
     mcp.add_middleware(StructuredLoggingMiddleware(include_payloads=_log_payloads_enabled()))
     register_tools(mcp)
     return mcp
