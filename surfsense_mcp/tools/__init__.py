@@ -1,9 +1,9 @@
 """Tool registration for the SurfSense MCP Server.
 
 Implements a discovery pattern: only a small default set of tools is registered
-on startup.  Two meta tools — ``list_available_tools`` and ``enable_tools`` —
-let the LLM discover the full catalog and dynamically enable additional tools
-at runtime.
+on startup.  Three meta tools — ``list_available_tools``, ``enable_tools``, and
+``execute_tool`` — let the LLM discover the full catalog and either dynamically
+enable or directly invoke additional tools at runtime.
 
 The ``SURFSENSE_MCP_ENABLED_TOOLS`` environment variable overrides the default
 set when provided (comma-separated tool names).
@@ -37,7 +37,7 @@ DEFAULT_TOOLS: set[str] = {
 }
 
 # Meta tool names — always registered, never in the catalog.
-META_TOOLS: set[str] = {"list_available_tools", "enable_tools"}
+META_TOOLS: set[str] = {"list_available_tools", "enable_tools", "execute_tool"}
 
 # Ordered (category_label, register_fn) — drives catalog grouping.
 _CATEGORY_REGISTRATIONS: list[tuple[str, Any]] = [
@@ -79,7 +79,7 @@ def register_tools(mcp: FastMCP) -> None:
     1. Register ALL tools from every category module.
     2. Build a catalog with names, descriptions, and categories.
     3. Remove all tools except the initial set + meta tools.
-    4. Register the two meta tools (``list_available_tools``, ``enable_tools``).
+    4. Register the meta tools (``list_available_tools``, ``enable_tools``, ``execute_tool``).
     """
     global _catalog  # noqa: PLW0603
     _catalog = _ToolCatalog(mcp=mcp)
@@ -133,7 +133,7 @@ def register_tools(mcp: FastMCP) -> None:
 
 
 def _register_meta_tools(mcp: FastMCP) -> None:
-    """Register the two meta tools for tool discovery."""
+    """Register the meta tools for tool discovery and proxy execution."""
 
     @mcp.tool()
     async def list_available_tools() -> dict[str, Any]:
@@ -150,6 +150,7 @@ def _register_meta_tools(mcp: FastMCP) -> None:
                 "name": entry.name,
                 "description": entry.description,
                 "enabled": entry.enabled,
+                "parameters": entry.component.parameters if hasattr(entry.component, "parameters") else {},
             }
             if not entry.enabled:
                 tool_info["action"] = "call enable_tools to activate"
@@ -199,3 +200,20 @@ def _register_meta_tools(mcp: FastMCP) -> None:
             "unknown": sorted(unknown),
             "total_enabled": sum(1 for e in _catalog.entries.values() if e.enabled),
         }
+
+    @mcp.tool()
+    async def execute_tool(tool_name: str, arguments: dict) -> Any:
+        """Execute any available tool by name. Use list_available_tools first
+        to discover tool names and their parameters.
+
+        Args:
+            tool_name: Name of the tool (from list_available_tools).
+            arguments: Dict of arguments matching the tool's parameters.
+        """
+        assert _catalog is not None
+        if tool_name in META_TOOLS:
+            return {"error": f"Meta tool '{tool_name}' must be called directly"}
+        entry = _catalog.entries.get(tool_name)
+        if entry is None:
+            return {"error": f"Unknown tool: {tool_name}", "hint": "Call list_available_tools to see available tools"}
+        return await entry.component.run(arguments)

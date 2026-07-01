@@ -39,14 +39,15 @@ Discovery (always registered):
 
 | Tool | Description |
 |---|---|
-| `list_available_tools` | List ALL available tools grouped by category, showing which are currently enabled. |
+| `list_available_tools` | List ALL available tools grouped by category, showing which are currently enabled and their parameters. |
 | `enable_tools` | Dynamically enable additional tools by name at runtime. |
+| `execute_tool` | Execute any cataloged tool by name without enabling it first. |
 
 ### Tool discovery
 
-Only 5 tools are registered on startup by default: `list_search_spaces`, `search_documents`, `query_surfsense`, `list_research_threads`, and `get_document`. The two discovery meta tools (`list_available_tools` and `enable_tools`) are always available.
+Only 5 tools are registered on startup by default: `list_search_spaces`, `search_documents`, `query_surfsense`, `list_research_threads`, and `get_document`. The three meta tools (`list_available_tools`, `enable_tools`, and `execute_tool`) are always available.
 
-To access additional tools, call `list_available_tools` to see the full catalog (28 tools across 6 categories), then call `enable_tools` with the names you need. This keeps the default tool surface small while making the full catalog discoverable.
+To access additional tools, call `list_available_tools` to see the full catalog (28 tools across 6 categories), then either call `execute_tool(tool_name='...', arguments={...})` to invoke any tool directly, or call `enable_tools` to activate tools for clients that support dynamic tool registration. This keeps the default tool surface small while making the full catalog discoverable.
 
 Override the default set with the `SURFSENSE_MCP_ENABLED_TOOLS` environment variable (comma-separated tool names).
 
