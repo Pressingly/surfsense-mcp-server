@@ -10,19 +10,29 @@ encrypted file tree inside the container, which means
   re-OAuths on next call), and
 - horizontal scaling is impossible (state is per-container).
 
-Setting ``MCP_OAUTH_STORAGE_URL`` swaps the file store for a Valkey/Redis
+Setting ``MCP_OAUTH_STORAGE_URL`` swaps the file store for a Redis/Valkey
 backend, Fernet-wrapped with a key derived from ``OIDC_CLIENT_SECRET``
 (confidential clients — preferred when present) or ``MCP_JWT_SIGNING_KEY``
 (public/PKCE clients) so the on-disk RDB never holds plaintext tokens.
 Unset → fall through to FastMCP's default file store (back-compat for
 users running the image outside the devstack).
+
+The Redis client is built explicitly via ``redis.asyncio.Redis.from_url``
+rather than ``RedisStore(url=...)``: the latter's URL helper (py-key-value-aio
+0.4.x) keeps only host/port/db/user/password and silently drops the scheme
+and every query parameter, so ``rediss://`` and ``?ssl_cert_reqs=none`` would
+be discarded and the connection would fall back to plaintext. ``from_url`` is
+redis-py's real parser — it honours ``rediss://`` (TLS on) and
+``ssl_cert_reqs=none`` (skip cert verification), which is what the GKE TLS-only
+Memorystore requires, while still accepting plain ``redis://`` for the
+in-cluster Valkey on the Docker Compose deployments.
 """
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 from cryptography.fernet import Fernet
 from fastmcp.server.auth.jwt_issuer import derive_jwt_key
@@ -39,47 +49,60 @@ logger = get_logger(__name__)
 # other doesn't.
 _STORAGE_KEY_SALT = "fastmcp-storage-encryption-key"
 
-_DEFAULT_VALKEY_PORT = 6379
-_DEFAULT_VALKEY_DB = 0
+# redis-py's ``from_url`` only understands ``redis``/``rediss``; the
+# ``valkey``/``valkeys`` aliases are normalised to those before parsing.
+_SCHEME_ALIASES = {"valkey": "redis", "valkeys": "rediss"}
+_ACCEPTED_SCHEMES = {"redis", "rediss", "valkey", "valkeys"}
 
 
 @dataclass(frozen=True)
-class ValkeyConfig:
-    """Parsed connection params for a Valkey/Redis URL."""
+class RedisConfig:
+    """A validated storage URL, normalised to a redis-py-compatible scheme.
 
+    ``url`` is fed verbatim to :func:`redis.asyncio.Redis.from_url`, so it
+    preserves the query string (e.g. ``?ssl_cert_reqs=none``). ``host``,
+    ``port`` and ``db`` are retained for logging only.
+    """
+
+    url: str
     host: str
     port: int
     db: int
-    username: str | None
-    password: str | None
 
 
-def parse_storage_url(raw: str) -> ValkeyConfig:
-    """Parse ``redis://`` / ``valkey://`` URL into connection params.
+def parse_storage_url(raw: str) -> RedisConfig:
+    """Parse and validate a ``redis(s)://`` / ``valkey(s)://`` storage URL.
 
-    Pure-Python; no I/O, no glide imports — separated from
+    Pure-Python; no I/O, no client imports — separated from
     :func:`build_oauth_storage` so tests can verify URL handling without
-    requiring the Valkey GLIDE client to be installed.
+    requiring the Redis client to be installed. ``valkey``/``valkeys``
+    schemes are normalised to ``redis``/``rediss`` (redis-py does not
+    recognise the Valkey aliases) while the rest of the URL — including any
+    query parameters such as ``ssl_cert_reqs=none`` — is preserved.
     """
     parsed = urlparse(raw)
-    if parsed.scheme not in {"redis", "valkey"}:
-        raise ValueError(f"MCP_OAUTH_STORAGE_URL scheme must be redis:// or valkey://, got {parsed.scheme!r}")
+    if parsed.scheme not in _ACCEPTED_SCHEMES:
+        raise ValueError(
+            f"MCP_OAUTH_STORAGE_URL scheme must be redis://, rediss://, valkey:// or valkeys://, got {parsed.scheme!r}"
+        )
     if not parsed.hostname:
         raise ValueError("MCP_OAUTH_STORAGE_URL is missing a hostname")
 
-    db = _DEFAULT_VALKEY_DB
+    db = 0
     if parsed.path and parsed.path != "/":
         try:
             db = int(parsed.path.lstrip("/"))
         except ValueError as exc:
             raise ValueError(f"MCP_OAUTH_STORAGE_URL path must be a numeric DB index, got {parsed.path!r}") from exc
 
-    return ValkeyConfig(
+    scheme = _SCHEME_ALIASES.get(parsed.scheme, parsed.scheme)
+    normalised = urlunparse(parsed._replace(scheme=scheme)) if scheme != parsed.scheme else raw
+
+    return RedisConfig(
+        url=normalised,
         host=parsed.hostname,
-        port=parsed.port or _DEFAULT_VALKEY_PORT,
+        port=parsed.port or 6379,
         db=db,
-        username=parsed.username or None,
-        password=parsed.password or None,
     )
 
 
@@ -88,7 +111,7 @@ def build_oauth_storage() -> AsyncKeyValue | None:
 
     Returns ``None`` when ``MCP_OAUTH_STORAGE_URL`` is unset, signalling
     FastMCP to keep its default encrypted file store. When set to a
-    ``redis://`` or ``valkey://`` URL, returns a :class:`ValkeyStore`
+    ``redis(s)://`` or ``valkey(s)://`` URL, returns a :class:`RedisStore`
     wrapped in :class:`FernetEncryptionWrapper`.
 
     Raises ``ValueError`` when the URL is malformed or neither
@@ -113,28 +136,28 @@ def build_oauth_storage() -> AsyncKeyValue | None:
         )
 
     # Imported lazily so unit tests for ``parse_storage_url`` and the
-    # missing-key-material guard don't require the Valkey GLIDE client.
-    from key_value.aio.stores.valkey import ValkeyStore
+    # missing-key-material guard don't require the Redis client.
+    from key_value.aio.stores.redis import RedisStore
+    from redis.asyncio import Redis
 
-    valkey_store = ValkeyStore(
-        host=config.host,
-        port=config.port,
-        db=config.db,
-        username=config.username,
-        password=config.password,
-    )
+    # Build the client explicitly so the scheme (``rediss://`` → TLS) and
+    # query params (``ssl_cert_reqs=none``) survive — RedisStore(url=...)
+    # would discard them. ``decode_responses=True`` matches the library's
+    # default so the Fernet wrapper sees the str shape it expects.
+    client = Redis.from_url(config.url, decode_responses=True)
+    redis_store = RedisStore(client=client)
     encryption_key = derive_jwt_key(
         high_entropy_material=key_material,
         salt=_STORAGE_KEY_SALT,
     )
     logger.info(
-        "OAuth state stored in valkey://%s:%d/%d (Fernet-encrypted at rest)",
+        "OAuth state stored in redis://%s:%d/%d (Fernet-encrypted at rest)",
         config.host,
         config.port,
         config.db,
     )
     return FernetEncryptionWrapper(
-        key_value=valkey_store,
+        key_value=redis_store,
         fernet=Fernet(key=encryption_key),
         raise_on_decryption_error=False,
     )

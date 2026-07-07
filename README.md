@@ -35,6 +35,22 @@ Chat (streaming):
 |---|---|
 | `query_surfsense` | Ask SurfSense a natural-language question. Streams over SSE from `POST /api/v1/new_chat`, creates a thread on demand, returns the concatenated answer + thread id. Subsumes summarize / compare / extract / quick_research / deep_research — just ask. |
 
+Discovery (always registered):
+
+| Tool | Description |
+|---|---|
+| `list_available_tools` | List ALL available tools grouped by category, showing which are currently enabled and their parameters. |
+| `enable_tools` | Dynamically enable additional tools by name at runtime. |
+| `execute_tool` | Execute any cataloged tool by name without enabling it first. |
+
+### Tool discovery
+
+Only 5 tools are registered on startup by default: `list_search_spaces`, `search_documents`, `query_surfsense`, `list_research_threads`, and `get_document`. The three meta tools (`list_available_tools`, `enable_tools`, and `execute_tool`) are always available.
+
+To access additional tools, call `list_available_tools` to see the full catalog (28 tools across 6 categories), then either call `execute_tool(tool_name='...', arguments={...})` to invoke any tool directly, or call `enable_tools` to activate tools for clients that support dynamic tool registration. This keeps the default tool surface small while making the full catalog discoverable.
+
+Override the default set with the `SURFSENSE_MCP_ENABLED_TOOLS` environment variable (comma-separated tool names).
+
 ## Transport modes
 
 The server supports two transports. Pick the one that matches how you're running it.
@@ -57,8 +73,8 @@ This is the more interesting layer. FastMCP's [`AWSCognitoProvider`](https://gof
 1. **Discovery** — the server publishes `/.well-known/oauth-authorization-server` (RFC 8414) and `/.well-known/oauth-protected-resource` (RFC 9728). MCP clients hit `/mcp`, get a `401 WWW-Authenticate: Bearer resource_metadata=…` challenge, and fetch the metadata.
 2. **DCR shim** — Cognito has no native [Dynamic Client Registration](https://datatracker.ietf.org/doc/html/rfc7591). The server's `/register` endpoint accepts MCP-client registrations and returns the *single, pre-registered* Cognito app client to all of them. So Claude Desktop, Cursor, MCP Inspector — every client looks like its own OAuth client to itself, but they all share the underlying Cognito client.
 3. **Authorization code flow with PKCE** — the server proxies `/authorize` → Cognito's hosted UI, captures the code at `/auth/callback`, exchanges it server-side at Cognito's `/oauth2/token` (with the confidential client secret, or PKCE-only when the Cognito client is public — `client_secret=""` is passed through and authlib handles the exchange without a Basic header), and returns the Cognito access token to the MCP client.
-4. **Bearer validation** — every `/mcp/*` request is Bearer-validated against the Cognito user pool's JWKS (no live calls to Cognito on the hot path).
-5. **Backend identity injection** — tools read the validated token's `username` claim and forward it as `X-Auth-Request-User` to the SurfSense backend on the internal docker network. SurfSense's `ProxyAuthMiddleware` reads the header, synthesizes `{username}@{SMB_NAME}.com` if no email is set, and auto-provisions/loads the user. **The Cognito Bearer is never forwarded** — identity on the MCP → backend leg is header-based, exactly like how oauth2-proxy injects identity for the web apps.
+4. **Bearer validation** — every `/mcp/*` request is Bearer-validated against the Cognito user pool's JWKS (no live calls to Cognito on the hot path). `SurfSenseCognitoProvider` also decodes the upstream **id_token** at token-exchange time and stashes its `email` / `cognito:username` under the FastMCP token's `upstream_claims`.
+5. **Backend identity injection** — how identity reaches SurfSense depends on `SURFSENSE_BASE_URL`'s scheme. On the **HTTP** (direct docker-network) shape, tools forward the id_token's `email` as `X-Auth-Request-Email`; SurfSense's `ProxyAuthMiddleware` reads it and auto-provisions/loads the user (the Cognito Bearer is never forwarded). On the **HTTPS** (through Traefik+mPass) shape, the id_token is forwarded as the Bearer and oauth2-proxy sets the identity header itself. Crucially it's the **id_token**, not the access token: a Cognito access token has no `email` claim and an opaque UUID `username` for federated users, so it would resolve a *different* SurfSense account than the web login.
 
 This means the MCP server is the only Moneta service that does *not* sit behind mPass (oauth2-proxy ForwardAuth) — MCP clients can't follow interactive OIDC redirects mid-stream, so we let FastMCP handle the full OAuth dance instead. The MCP → SurfSense leg also bypasses mPass: it goes direct on the docker network, with the trust boundary being the network itself (no host port published).
 
@@ -226,7 +242,9 @@ The fastest way to verify a fresh deploy. Inspector is `npx`-installed, runs loc
 
 - **`UNABLE_TO_VERIFY_LEAF_SIGNATURE` / `DEPTH_ZERO_SELF_SIGNED_CERT`** in MCP Inspector or other Node clients. The devstack uses a self-signed cert. Either install it system-wide or set `NODE_EXTRA_CA_CERTS=/path/to/foss-server-bundle-devstack/traefik/certs/local.crt` before launching the client.
 
-- **`401 Unauthorized` from `/mcp` after successful OAuth.** Almost always means the validated Cognito token is missing the `username` claim — check the user pool's `user_id_claim` setting and that `AWSCognitoProvider`'s claim filter is in use (it's the default).
+- **`401 Unauthorized` from `/mcp` after successful OAuth.** Almost always means the inbound Cognito Bearer failed JWKS validation — check the user pool / region / client-id config and that `SurfSenseCognitoProvider` (subclass of `AWSCognitoProvider`) is in use.
+
+- **A *different* SurfSense user is created/loaded than your web login** (e.g. a UUID-named account like `09daf50c-…@askii.ai` instead of `1020010000020127@askii.ai`). The relay is identifying you by the Cognito **access token** (no `email`, opaque `username`) instead of the **id_token**. Confirm `get_header_mcp()` builds `SurfSenseCognitoProvider` (not the stock `AWSCognitoProvider`) so `_extract_upstream_claims` captures the id_token, and that the Cognito client returns an id_token (the `openid` scope is requested). Logs will show a `No upstream id_token` warning when this is misconfigured.
 
 - **`Cognito username claim missing on validated token`** in MCP server logs. Same root cause as above; the server raises here rather than silently sending a header with no value.
 
@@ -244,10 +262,11 @@ The fastest way to verify a fresh deploy. Inspector is `npx`-installed, runs loc
 | `OIDC_CLIENT_SECRET` | conditional | http | Set when the Cognito client is confidential. Leave unset for public/PKCE clients (then `MCP_JWT_SIGNING_KEY` is required). Exactly one of the two must be set. |
 | `MCP_JWT_SIGNING_KEY` | conditional | http | Required when the Cognito client is public (no secret). High-entropy string used both to sign FastMCP-issued JWTs and to derive the Fernet key for `MCP_OAUTH_STORAGE_URL`. Generate with `openssl rand -hex 32`. Rotating it invalidates persisted OAuth state. |
 | `MCP_ALLOWED_CLIENT_REDIRECT_URIS` | optional | http | Comma-separated allow-list for DCR-registered redirect URIs. Empty/unset → localhost-only defaults (covers Claude Desktop, Cursor, MCP Inspector). Add server-side MCP clients explicitly. |
-| `MCP_OAUTH_STORAGE_URL` | optional | http | Valkey/Redis URL for OAuth state (`redis://valkey:6379/11`). Unset → encrypted file store on the container filesystem; tokens are wiped on container recreation and there's no path to multi-replica. Set this in any deployment that needs to survive `docker compose down && up` or scale beyond one replica. State at rest is Fernet-encrypted using a key derived from `OIDC_CLIENT_SECRET` (preferred — confidential clients) or `MCP_JWT_SIGNING_KEY` (fallback — public/PKCE clients). |
+| `MCP_OAUTH_STORAGE_URL` | optional | http | Redis/Valkey URL for OAuth state. Use `redis://valkey:6379/11` for a plain in-cluster Valkey, or `rediss://<host>:<port>/11?ssl_cert_reqs=none` for a TLS-only managed instance (e.g. GCP Memorystore). `valkey://` / `valkeys://` are accepted as aliases. Unset → encrypted file store on the container filesystem; tokens are wiped on container recreation and there's no path to multi-replica. Set this in any deployment that needs to survive `docker compose down && up` or scale beyond one replica. State at rest is Fernet-encrypted using a key derived from `OIDC_CLIENT_SECRET` (preferred — confidential clients) or `MCP_JWT_SIGNING_KEY` (fallback — public/PKCE clients). |
 | `MCP_ENV` | optional | http | `production` triggers warnings when `MCP_ALLOWED_ORIGINS` is unset/`*` or `MCP_OAUTH_STORAGE_URL` is unset. Default `development`. |
 | `MCP_ALLOWED_ORIGINS` | optional | http | Comma-separated CORS origins. Default `*`. |
 | `MCP_LOG_LEVEL` | optional | both | `DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL` (case-insensitive). Unset → derived from `MCP_ENV`: `production` → `INFO`, anything else → `DEBUG`. Bogus values warn at startup and fall through to the env-derived default. |
+| `SURFSENSE_MCP_ENABLED_TOOLS` | optional | both | Comma-separated list of tool names to enable on startup. Overrides the default 5-tool set. Unset or empty enables the defaults; the two discovery meta tools are always registered regardless. |
 | `MCP_LOG_PAYLOADS` | optional | both | When truthy (`1`/`true`/`yes`/`on`), the structured-logging middleware includes tool request/response payloads. Default off — payloads can include chat prompts, document bodies, and base64 uploads. Useful for short debugging windows only. |
 
 ## Deployment in `foss-server-bundle-devstack`
@@ -289,6 +308,6 @@ uv run --with coverage --with pytest-cov pytest \
 uv sync --extra dev --upgrade-package fastmcp
 ```
 
-Tests use an in-memory `httpx.MockTransport` fixture — no running SurfSense instance required. The HTTP-mode auth path (Cognito Bearer → `X-Auth-Request-User` injection) is covered separately by `tests/test_http_mode_auth.py`, which also stubs the OIDC discovery doc so the suite never hits the real Cognito service.
+Tests use an in-memory `httpx.MockTransport` fixture — no running SurfSense instance required. The HTTP-mode auth path (id_token → `X-Auth-Request-Email` injection / id_token Bearer forwarding) is covered by `tests/test_http_mode_auth.py` and `tests/test_auth_http.py`; the id_token claim capture is covered by `tests/test_auth_cognito.py`. These also stub the OIDC discovery doc so the suite never hits the real Cognito service.
 
 See `CLAUDE.md` for tool conventions, FastMCP version notes, and constraints when adding new tools.

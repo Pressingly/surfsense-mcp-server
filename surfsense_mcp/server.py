@@ -12,6 +12,21 @@ from surfsense_mcp.tools import register_tools
 
 ICON = Icon(src="https://surfsense.net/favicon.ico", alt="SurfSense MCP Server")
 
+_INSTRUCTIONS = (
+    "Manages search spaces, documents, research threads, reports, notes, and "
+    "logs in SurfSense, an AI research platform.\n\n"
+    "Tool discovery: only a small default set of tools is available on startup. "
+    "If the current tools cannot fulfill a request:\n"
+    "1. Call list_available_tools to see all available tools with their parameters.\n"
+    "2. Call execute_tool(tool_name='...', arguments={...}) to use any tool from the catalog.\n\n"
+    "The execute_tool proxy lets you call any available tool without additional setup. "
+    "You can also use enable_tools to activate tools directly if your client supports "
+    "dynamic tool registration.\n\n"
+    "Getting started: use list_search_spaces to discover available search "
+    "spaces, then search_documents or query_surfsense to find and interact "
+    "with content."
+)
+
 # Default — covers Claude Desktop, Cursor, and MCP Inspector on a developer
 # laptop. Non-localhost MCP clients (e.g. the Askii AI app) must be added via
 # MCP_ALLOWED_CLIENT_REDIRECT_URIS to register at /register (DCR shim).
@@ -54,6 +69,24 @@ def _allowed_client_redirect_uris() -> list[str]:
     return allowed_uris
 
 
+def _required_scopes() -> list[str]:
+    """OAuth scopes requested upstream from Cognito (space- or comma-separated).
+
+    Default is ``openid`` only. Cognito already includes the user's readable
+    attributes — crucially ``email`` and ``cognito:username`` — in the **id_token**
+    of the authorization-code flow with just ``openid``, which is all the SurfSense
+    identity relay needs (see ``auth/cognito.py``). Requesting ``email`` / ``profile``
+    additionally is **not** required and fails with ``invalid_scope`` unless those
+    OAuth scopes are explicitly enabled on the Cognito app client. Operators whose
+    client does enable them can opt in via ``MCP_OIDC_SCOPES="openid email profile"``.
+    """
+    raw = os.getenv("MCP_OIDC_SCOPES", "").strip()
+    if not raw:
+        return ["openid"]
+    scopes = [s.strip() for s in raw.replace(",", " ").split() if s.strip()]
+    return scopes or ["openid"]
+
+
 def get_header_mcp() -> FastMCP:
     """HTTP mode — FastMCP is the sole auth layer (mPass is NOT in front).
 
@@ -70,27 +103,35 @@ def get_header_mcp() -> FastMCP:
     the SurfSense backend depends on ``SURFSENSE_BASE_URL`` (see
     :mod:`surfsense_mcp.auth.http`):
 
-    * HTTPS base URL → forward the validated Cognito Bearer untouched and let
-      oauth2-proxy / mPass validate it (against the same JWKS) and set
-      ``X-Auth-Request-User`` itself.
+    * HTTPS base URL → forward the upstream id_token through Traefik+mPass and
+      let oauth2-proxy validate it (against the same JWKS) and set
+      ``X-Auth-Request-Email`` / ``X-Auth-Request-User`` itself.
     * HTTP base URL → call SurfSense direct on the docker network and inject
-      ``X-Auth-Request-User`` from the validated token's ``username`` claim.
-    """
-    from fastmcp.server.auth.providers.aws import AWSCognitoProvider
+      ``X-Auth-Request-Email`` from the id_token's ``email`` claim.
 
+    Both paths rely on :class:`~surfsense_mcp.auth.cognito.SurfSenseCognitoProvider`
+    to surface the id_token's identity claims — the Cognito *access* token alone
+    carries no ``email`` and an opaque ``username`` for federated users, which
+    would resolve a different SurfSense account than the web login.
+    """
+    from surfsense_mcp.auth.cognito import SurfSenseCognitoProvider
     from surfsense_mcp.auth.storage import build_oauth_storage
 
     client_secret = os.getenv("OIDC_CLIENT_SECRET", "")
     jwt_signing_key = os.getenv("MCP_JWT_SIGNING_KEY") or None
 
-    provider = AWSCognitoProvider(
+    provider = SurfSenseCognitoProvider(
         user_pool_id=os.environ["COGNITO_USER_POOL_ID"],
         aws_region=os.environ["COGNITO_AWS_REGION"],
         client_id=os.environ["OIDC_CLIENT_ID"],
         client_secret=client_secret,
         base_url=os.environ["MCP_BASE_URL"],
         redirect_path="/auth/callback",
-        required_scopes=["openid"],
+        # `openid` only by default — Cognito puts email / cognito:username in the
+        # id_token without the email/profile OAuth scopes, and requesting those
+        # against a client that doesn't enable them fails with invalid_scope.
+        # Override via MCP_OIDC_SCOPES if the app client allows more (see helper).
+        required_scopes=_required_scopes(),
         allowed_client_redirect_uris=_allowed_client_redirect_uris(),
         # Cognito User Pools don't honor RFC 8707 Resource Indicators the way
         # the spec requires — forwarding `resource` on /authorize without it
@@ -108,6 +149,7 @@ def get_header_mcp() -> FastMCP:
 
     mcp = FastMCP(
         "SurfSense MCP Server (http)",
+        instructions=_INSTRUCTIONS,
         icons=[ICON],
         website_url="https://surfsense.net",
         auth=provider,
@@ -124,7 +166,7 @@ def get_stdio_mcp() -> FastMCP:
     or fall back to the email/password login flow provided by
     ``surfsense_mcp.auth.stdio``.
     """
-    mcp = FastMCP("SurfSense MCP Server (stdio)", icons=[ICON])
+    mcp = FastMCP("SurfSense MCP Server (stdio)", instructions=_INSTRUCTIONS, icons=[ICON])
     mcp.add_middleware(StructuredLoggingMiddleware(include_payloads=_log_payloads_enabled()))
     register_tools(mcp)
     return mcp
