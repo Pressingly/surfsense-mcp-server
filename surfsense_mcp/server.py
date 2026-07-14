@@ -147,6 +147,18 @@ def get_header_mcp() -> FastMCP:
         jwt_signing_key=jwt_signing_key,
     )
 
+    # AWSCognitoProvider fetches the authorization_endpoint from Cognito's OIDC
+    # discovery, which points at Cognito's hosted UI. In deployments where an
+    # auth proxy (e.g. mpass-auth-proxy) sits in front of Cognito and provides
+    # the actual login page, override the authorize redirect so users land on
+    # the proxy instead of raw Cognito.
+    upstream_auth_url = os.getenv("COGNITO_UPSTREAM_AUTH_URL", "").strip()
+    if upstream_auth_url:
+        provider._upstream_authorization_endpoint = upstream_auth_url
+    upstream_token_url = os.getenv("COGNITO_UPSTREAM_TOKEN_URL", "").strip()
+    if upstream_token_url:
+        provider._upstream_token_endpoint = upstream_token_url
+
     mcp = FastMCP(
         "SurfSense MCP Server (http)",
         instructions=_INSTRUCTIONS,
