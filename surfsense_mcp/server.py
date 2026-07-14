@@ -155,6 +155,9 @@ def get_header_mcp() -> FastMCP:
     upstream_auth_url = os.getenv("COGNITO_UPSTREAM_AUTH_URL", "").strip()
     if upstream_auth_url:
         provider._upstream_authorization_endpoint = upstream_auth_url
+    upstream_token_url = os.getenv("COGNITO_UPSTREAM_TOKEN_URL", "").strip()
+    if upstream_token_url:
+        provider._upstream_token_endpoint = upstream_token_url
 
     mcp = FastMCP(
         "SurfSense MCP Server (http)",
