@@ -27,14 +27,6 @@ _INSTRUCTIONS = (
     "with content."
 )
 
-# Default — covers Claude Desktop, Cursor, and MCP Inspector on a developer
-# laptop. Non-localhost MCP clients (e.g. the Askii AI app) must be added via
-# MCP_ALLOWED_CLIENT_REDIRECT_URIS to register at /register (DCR shim).
-_DEFAULT_ALLOWED_CLIENT_REDIRECT_URIS: tuple[str, ...] = (
-    "http://localhost:*/*",
-    "http://127.0.0.1:*/*",
-)
-
 _TRUTHY_ENV_VALUES: frozenset[str] = frozenset({"1", "true", "yes", "on"})
 
 
@@ -50,23 +42,22 @@ def _log_payloads_enabled() -> bool:
     return os.getenv("MCP_LOG_PAYLOADS", "").strip().lower() in _TRUTHY_ENV_VALUES
 
 
-def _allowed_client_redirect_uris() -> list[str]:
+def _allowed_client_redirect_uris() -> list[str] | None:
     """Parse MCP_ALLOWED_CLIENT_REDIRECT_URIS (comma-separated).
 
-    Unset/empty → localhost defaults. Operators opt in to broader allow-lists
-    by listing specific patterns — do not allow arbitrary redirect URIs, they
-    let an attacker DCR-register a malicious client and exfiltrate user tokens
-    once the user authorizes.
+    Unset/empty → None (allow all), matching penpot-mcp's behaviour so SMBs
+    can deploy with any MCP client without pre-configuring callback URLs.
     """
     raw = os.getenv("MCP_ALLOWED_CLIENT_REDIRECT_URIS", "").strip()
     if not raw:
-        return list(_DEFAULT_ALLOWED_CLIENT_REDIRECT_URIS)
+        logger.warning(
+            "MCP_ALLOWED_CLIENT_REDIRECT_URIS is unset — dynamic client registration "
+            "accepts any redirect_uri. Set an allow-list for hardened deployments."
+        )
+        return None
 
     allowed_uris = [uri.strip() for uri in raw.split(",") if uri.strip()]
-    if not allowed_uris:
-        return list(_DEFAULT_ALLOWED_CLIENT_REDIRECT_URIS)
-
-    return allowed_uris
+    return allowed_uris or None
 
 
 def _required_scopes() -> list[str]:
