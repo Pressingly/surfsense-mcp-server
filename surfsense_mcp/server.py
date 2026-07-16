@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import os
+
+logger = logging.getLogger("fastmcp.surfsense_mcp")
 
 from fastmcp import FastMCP
 from fastmcp.server.middleware.logging import StructuredLoggingMiddleware
