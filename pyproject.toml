@@ -18,6 +18,10 @@ dependencies = [
     # (see surfsense_mcp/auth/cognito.py). Present transitively via fastmcp;
     # pinned explicitly because we import it directly.
     "pyjwt>=2.0.0",
+    # Register the compliance hook that corrects the upstream `expires_in`
+    # (see surfsense_mcp/auth/cognito.py). Present transitively via fastmcp;
+    # pinned explicitly because we import it directly.
+    "authlib>=1.6.9",
     "starlette>=0.37.0",
     "uvicorn>=0.30.0",
     # Adds the redis-py backend so HTTP-mode OAuth state can be stored
