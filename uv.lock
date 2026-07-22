@@ -1343,6 +1343,7 @@ name = "surfsense-mcp-server"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "authlib" },
     { name = "fastmcp" },
     { name = "httpx" },
     { name = "mcp" },
@@ -1361,6 +1362,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "authlib", specifier = ">=1.6.9" },
     { name = "fastmcp", specifier = ">=3.2.0,<4.0.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "mcp", specifier = ">=1.26.0" },
