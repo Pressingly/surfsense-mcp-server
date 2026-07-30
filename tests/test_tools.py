@@ -10,7 +10,7 @@ from fastmcp import Client
 
 from surfsense_mcp import auth as auth_module
 from surfsense_mcp.server import get_stdio_mcp
-from tests.conftest import FAKE_JWT, json_response
+from tests.conftest import ALL_TOOL_NAMES, DELETE_TOOL_NAMES, FAKE_JWT, json_response
 
 
 def _assert_bearer(request: httpx.Request, token: str = FAKE_JWT) -> None:
@@ -819,92 +819,75 @@ async def test_password_login_retries_once_on_401(mock_transport, monkeypatch: p
 
 
 # ---------------------------------------------------------------------------
-# Tool discovery — list_available_tools / enable_tools
+# Tool surface — the runtime discovery layer was removed
+# ---------------------------------------------------------------------------
+
+# The removed meta tools. None of these may reappear on tools/list.
+META_TOOLS = ("list_available_tools", "enable_tools", "execute_tool")
+
+
+async def _listed_tool_names() -> set[str]:
+    async with Client(get_stdio_mcp()) as client:
+        return {t.name for t in await client.list_tools()}
+
+
+async def test_every_tool_is_listed() -> None:
+    """tools/list returns the full surface, not a discovery subset."""
+    assert await _listed_tool_names() == set(ALL_TOOL_NAMES)
+
+
+async def test_meta_tools_are_gone() -> None:
+    """The discovery layer is not registered or listed anywhere."""
+    names = await _listed_tool_names()
+    for meta in META_TOOLS:
+        assert meta not in names
+
+
+async def test_enabled_tools_env_var_is_not_honoured(monkeypatch) -> None:
+    """SURFSENSE_MCP_ENABLED_TOOLS was removed — a stale value must not narrow the set."""
+    monkeypatch.setenv("SURFSENSE_MCP_ENABLED_TOOLS", "list_search_spaces")
+    assert await _listed_tool_names() == set(ALL_TOOL_NAMES)
+
+
+async def test_previously_gated_tool_is_callable_without_enabling(mock_transport) -> None:
+    """A tool that used to need enable_tools is now directly callable."""
+    mock_transport(lambda req: json_response({"id": 7, "name": "research"}))
+    data = await _call_tool("get_search_space", {"search_space_id": 7})
+    assert data["id"] == 7
+
+
+# ---------------------------------------------------------------------------
+# Delete gating — SURFSENSE_ENABLE_DELETE (opt-in, default off)
 # ---------------------------------------------------------------------------
 
 
-async def test_list_available_tools_returns_all_categories(mock_transport) -> None:
-    """list_available_tools returns the full catalog grouped by category."""
-    mock_transport(lambda req: json_response({}))
-    data = await _call_tool("list_available_tools", {})
-    assert data["total_tools"] == 28
-    assert set(data["categories"].keys()) == {
-        "Search Spaces",
-        "Documents",
-        "Research Threads",
-        "Reports",
-        "Notes",
-        "Logs",
-    }
-    # Every tool should be enabled because _env sets ALL_TOOL_NAMES.
-    assert data["enabled_count"] == 28
+async def test_deletes_are_absent_by_default(monkeypatch) -> None:
+    """With no flag set, none of the five delete tools are registered."""
+    monkeypatch.delenv("SURFSENSE_ENABLE_DELETE", raising=False)
+    names = await _listed_tool_names()
+    assert names == set(ALL_TOOL_NAMES) - set(DELETE_TOOL_NAMES)
+    assert not (names & set(DELETE_TOOL_NAMES))
 
 
-async def test_default_tools_only_when_env_unset(monkeypatch, mock_transport) -> None:
-    """Without SURFSENSE_MCP_ENABLED_TOOLS, only the 5 defaults + meta tools are registered."""
-    monkeypatch.delenv("SURFSENSE_MCP_ENABLED_TOOLS", raising=False)
-    mock_transport(lambda req: json_response({}))
-
-    mcp = get_stdio_mcp()
-    async with Client(mcp) as client:
-        tools = await client.list_tools()
-
-    tool_names = {t.name for t in tools}
-    from surfsense_mcp.tools import DEFAULT_TOOLS, META_TOOLS
-
-    assert tool_names == DEFAULT_TOOLS | META_TOOLS
+@pytest.mark.parametrize("value", ["", "false", "0", "no", "off", "maybe"])
+async def test_falsey_values_leave_deletes_off(monkeypatch, value: str) -> None:
+    monkeypatch.setenv("SURFSENSE_ENABLE_DELETE", value)
+    assert not (await _listed_tool_names() & set(DELETE_TOOL_NAMES))
 
 
-async def test_enable_tools_registers_new_tool(monkeypatch, mock_transport) -> None:
-    """enable_tools dynamically registers a previously disabled tool."""
-    monkeypatch.delenv("SURFSENSE_MCP_ENABLED_TOOLS", raising=False)
-    mock_transport(lambda req: json_response({"id": 7, "name": "research"}))
-
-    mcp = get_stdio_mcp()
-    async with Client(mcp) as client:
-        # get_search_space should not be available yet.
-        tools_before = {t.name for t in await client.list_tools()}
-        assert "get_search_space" not in tools_before
-
-        # Enable it.
-        result = await client.call_tool("enable_tools", {"tool_names": ["get_search_space"]})
-        enable_data = json.loads(result.content[0].text)
-        assert enable_data["newly_enabled"] == ["get_search_space"]
-
-        # Now it should be callable.
-        result = await client.call_tool("get_search_space", {"search_space_id": 7})
-        data = json.loads(result.content[0].text)
-        assert data["id"] == 7
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on", " true ", "\ttrue\n"])
+async def test_truthy_values_register_all_deletes(monkeypatch, value: str) -> None:
+    """Whitespace and case must not silently leave deletes off."""
+    monkeypatch.setenv("SURFSENSE_ENABLE_DELETE", value)
+    names = await _listed_tool_names()
+    assert set(DELETE_TOOL_NAMES) <= names
+    assert names == set(ALL_TOOL_NAMES)
 
 
-async def test_enable_tools_already_enabled(mock_transport) -> None:
-    """enable_tools reports already-enabled tools without re-registering."""
-    mock_transport(lambda req: json_response({}))
-    data = await _call_tool("enable_tools", {"tool_names": ["list_search_spaces", "nonexistent_tool"]})
-    assert "list_search_spaces" in data["already_enabled"]
-    assert "nonexistent_tool" in data["unknown"]
-    assert data["newly_enabled"] == []
-
-
-async def test_list_available_tools_marks_enabled_correctly(monkeypatch, mock_transport) -> None:
-    """list_available_tools reflects which tools are enabled vs disabled."""
-    monkeypatch.delenv("SURFSENSE_MCP_ENABLED_TOOLS", raising=False)
-    mock_transport(lambda req: json_response({}))
-
-    mcp = get_stdio_mcp()
-    async with Client(mcp) as client:
-        result = await client.call_tool("list_available_tools", {})
-        data = json.loads(result.content[0].text)
-
-    assert data["enabled_count"] == 5
-    assert data["total_tools"] == 28
-
-    # Verify the default tools are marked enabled.
-    from surfsense_mcp.tools import DEFAULT_TOOLS
-
-    for cat_tools in data["categories"].values():
-        for tool in cat_tools:
-            if tool["name"] in DEFAULT_TOOLS:
-                assert tool["enabled"] is True
-            else:
-                assert tool["enabled"] is False
+async def test_disabling_deletes_keeps_every_other_tool(monkeypatch) -> None:
+    """The gate must not swallow the non-delete tools defined after it."""
+    monkeypatch.delenv("SURFSENSE_ENABLE_DELETE", raising=False)
+    names = await _listed_tool_names()
+    # Tools defined *after* the gated block in documents.py / threads.py.
+    for survivor in ("get_document_status", "get_document_type_counts", "get_thread_messages"):
+        assert survivor in names

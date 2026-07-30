@@ -9,6 +9,7 @@ from fastmcp import FastMCP
 from fastmcp.utilities.logging import get_logger
 
 from surfsense_mcp.client import authed_request, stream_authed_post
+from surfsense_mcp.config import delete_tools_enabled
 
 logger = get_logger(__name__)
 
@@ -75,18 +76,20 @@ def register_thread_tools(mcp: FastMCP) -> None:
         response = await authed_request("GET", f"/api/v1/threads/{thread_id}")
         return response.json()
 
-    @mcp.tool()
-    async def delete_research_thread(thread_id: int) -> dict[str, Any]:
-        """
-        Permanently delete a research thread and its messages. Only the
-        thread creator (or a user with thread-delete permission in the
-        space) can call this.
+    if delete_tools_enabled():
 
-        Returns:
-            Backend confirmation: `{"message": "..."}`.
-        """
-        response = await authed_request("DELETE", f"/api/v1/threads/{thread_id}")
-        return response.json()
+        @mcp.tool()
+        async def delete_research_thread(thread_id: int) -> dict[str, Any]:
+            """
+            Permanently delete a research thread and its messages. Only the
+            thread creator (or a user with thread-delete permission in the
+            space) can call this.
+
+            Returns:
+                Backend confirmation: `{"message": "..."}`.
+            """
+            response = await authed_request("DELETE", f"/api/v1/threads/{thread_id}")
+            return response.json()
 
     @mcp.tool()
     async def get_thread_messages(thread_id: int) -> list[dict[str, Any]]:

@@ -5,6 +5,7 @@ from typing import Any
 from fastmcp import FastMCP
 
 from surfsense_mcp.client import authed_request
+from surfsense_mcp.config import delete_tools_enabled
 
 
 def register_search_space_tools(mcp: FastMCP) -> None:
@@ -130,15 +131,17 @@ def register_search_space_tools(mcp: FastMCP) -> None:
         response = await authed_request("PUT", f"/api/v1/searchspaces/{search_space_id}", json=body)
         return response.json()
 
-    @mcp.tool()
-    async def delete_search_space(search_space_id: int) -> dict[str, Any]:
-        """
-        Delete a search space and ALL its documents, threads, and reports.
+    if delete_tools_enabled():
 
-        Irreversible. Requires owner-level access.
+        @mcp.tool()
+        async def delete_search_space(search_space_id: int) -> dict[str, Any]:
+            """
+            Delete a search space and ALL its documents, threads, and reports.
 
-        Returns:
-            `{"message": "..."}` confirmation from the backend.
-        """
-        response = await authed_request("DELETE", f"/api/v1/searchspaces/{search_space_id}")
-        return response.json()
+            Irreversible. Requires owner-level access.
+
+            Returns:
+                `{"message": "..."}` confirmation from the backend.
+            """
+            response = await authed_request("DELETE", f"/api/v1/searchspaces/{search_space_id}")
+            return response.json()
