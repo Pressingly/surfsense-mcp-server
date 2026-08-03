@@ -18,3 +18,9 @@ env/
 .coverage
 htmlcov/
 .DS_Store
+
+# graphify knowledge graph (generated, per-machine)
+graphify-out/
+
+# Claude Code local state
+.claude/

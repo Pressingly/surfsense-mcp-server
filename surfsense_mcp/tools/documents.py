@@ -9,6 +9,7 @@ from typing import Any
 from fastmcp import FastMCP
 
 from surfsense_mcp.client import authed_multipart_post, authed_request
+from surfsense_mcp.config import delete_tools_enabled
 
 # Mirrors MAX_FILE_SIZE_BYTES in surfsense_backend/app/routes/documents_routes.py.
 # Duplicated rather than imported because the backend is a separate package.
@@ -311,19 +312,21 @@ def register_document_tools(mcp: FastMCP) -> None:
         response = await authed_request("PUT", f"/api/v1/documents/{document_id}", json=body)
         return response.json()
 
-    @mcp.tool()
-    async def delete_document(document_id: int) -> dict[str, Any]:
-        """
-        Permanently delete a document.
+    if delete_tools_enabled():
 
-        Requires DOCUMENTS_DELETE permission. Documents in "processing" state
-        cannot be deleted.
+        @mcp.tool()
+        async def delete_document(document_id: int) -> dict[str, Any]:
+            """
+            Permanently delete a document.
 
-        Returns:
-            Backend confirmation: `{"message": "..."}`.
-        """
-        response = await authed_request("DELETE", f"/api/v1/documents/{document_id}")
-        return response.json()
+            Requires DOCUMENTS_DELETE permission. Documents in "processing" state
+            cannot be deleted.
+
+            Returns:
+                Backend confirmation: `{"message": "..."}`.
+            """
+            response = await authed_request("DELETE", f"/api/v1/documents/{document_id}")
+            return response.json()
 
     @mcp.tool()
     async def get_document_status(search_space_id: int, document_ids: str) -> dict[str, Any]:

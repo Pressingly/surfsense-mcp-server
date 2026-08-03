@@ -8,6 +8,7 @@ from surfsense_mcp.client import (
     authed_request,
     stream_authed_get,
 )
+from surfsense_mcp.config import delete_tools_enabled
 
 VALID_EXPORT_FORMATS = {"pdf", "docx", "html", "latex", "epub", "odt", "plain"}
 
@@ -122,13 +123,15 @@ def register_report_tools(mcp: FastMCP) -> None:
             "filename": filename,
         }
 
-    @mcp.tool()
-    async def delete_report(report_id: int) -> dict[str, Any]:
-        """
-        Permanently delete a report.
+    if delete_tools_enabled():
 
-        Returns:
-            Backend confirmation: `{"message": "..."}`.
-        """
-        response = await authed_request("DELETE", f"/api/v1/reports/{report_id}")
-        return response.json()
+        @mcp.tool()
+        async def delete_report(report_id: int) -> dict[str, Any]:
+            """
+            Permanently delete a report.
+
+            Returns:
+                Backend confirmation: `{"message": "..."}`.
+            """
+            response = await authed_request("DELETE", f"/api/v1/reports/{report_id}")
+            return response.json()
