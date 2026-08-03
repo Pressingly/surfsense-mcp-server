@@ -5,6 +5,7 @@ from typing import Any
 from fastmcp import FastMCP
 
 from surfsense_mcp.client import authed_request
+from surfsense_mcp.config import delete_tools_enabled
 
 
 def register_note_tools(mcp: FastMCP) -> None:
@@ -46,13 +47,15 @@ def register_note_tools(mcp: FastMCP) -> None:
         )
         return response.json()
 
-    @mcp.tool()
-    async def delete_note(search_space_id: int, note_id: int) -> dict[str, Any]:
-        """
-        Delete a note document.
+    if delete_tools_enabled():
 
-        Returns:
-            Backend confirmation.
-        """
-        response = await authed_request("DELETE", f"/api/v1/search-spaces/{search_space_id}/notes/{note_id}")
-        return response.json()
+        @mcp.tool()
+        async def delete_note(search_space_id: int, note_id: int) -> dict[str, Any]:
+            """
+            Permanently delete a note document.
+
+            Returns:
+                Backend confirmation.
+            """
+            response = await authed_request("DELETE", f"/api/v1/search-spaces/{search_space_id}/notes/{note_id}")
+            return response.json()

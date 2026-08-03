@@ -1,23 +1,23 @@
 """Tool registration for the SurfSense MCP Server.
 
-Implements a discovery pattern: only a small default set of tools is registered
-on startup.  Three meta tools — ``list_available_tools``, ``enable_tools``, and
-``execute_tool`` — let the LLM discover the full catalog and either dynamically
-enable or directly invoke additional tools at runtime.
+Every tool the server exposes is registered on startup and returned by
+``tools/list``: an LLM sees the real tool list on connect and calls tools
+directly, with no runtime discovery or enablement step in between.
 
-The ``SURFSENSE_MCP_ENABLED_TOOLS`` environment variable overrides the default
-set when provided (comma-separated tool names).
+The one exception is the destructive ``delete_*`` family, which is opt-in
+behind ``SURFSENSE_ENABLE_DELETE`` (see :mod:`surfsense_mcp.config`) and is
+not registered at all unless that flag is set.
 """
 
 from __future__ import annotations
 
 import logging
-import os
-from dataclasses import dataclass, field
-from typing import Any
+from collections.abc import Callable
 
 from fastmcp import FastMCP
+from fastmcp.tools import Tool
 
+from surfsense_mcp.config import delete_tools_enabled
 from surfsense_mcp.tools.documents import register_document_tools
 from surfsense_mcp.tools.logs import register_log_tools
 from surfsense_mcp.tools.notes import register_note_tools
@@ -27,193 +27,48 @@ from surfsense_mcp.tools.threads import register_thread_tools
 
 logger = logging.getLogger(__name__)
 
-# Tools registered on startup when SURFSENSE_MCP_ENABLED_TOOLS is unset.
-DEFAULT_TOOLS: set[str] = {
-    "list_search_spaces",
-    "search_documents",
-    "query_surfsense",
-    "list_research_threads",
-    "get_document",
-}
-
-# Meta tool names — always registered, never in the catalog.
-META_TOOLS: set[str] = {"list_available_tools", "enable_tools", "execute_tool"}
-
-# Ordered (category_label, register_fn) — drives catalog grouping.
-_CATEGORY_REGISTRATIONS: list[tuple[str, Any]] = [
-    ("Search Spaces", register_search_space_tools),
-    ("Documents", register_document_tools),
-    ("Research Threads", register_thread_tools),
-    ("Reports", register_report_tools),
-    ("Notes", register_note_tools),
-    ("Logs", register_log_tools),
+# Ordered per-category registration functions — one entry per tool module,
+# in the order their tools are registered.
+_CATEGORY_REGISTRATIONS: list[Callable[[FastMCP], None]] = [
+    register_search_space_tools,
+    register_document_tools,
+    register_thread_tools,
+    register_report_tools,
+    register_note_tools,
+    register_log_tools,
 ]
 
 
-@dataclass
-class _ToolEntry:
-    """Catalog entry for a single tool."""
+def _registered_tool_count(mcp: FastMCP) -> int | None:
+    """Number of tools registered on ``mcp``, or None when it can't be read.
 
-    name: str
-    description: str
-    category: str
-    component: Any  # FunctionTool — kept for re-registration
-    enabled: bool = False
-
-
-@dataclass
-class _ToolCatalog:
-    """Holds the full tool catalog and the MCP instance for runtime changes."""
-
-    mcp: FastMCP
-    entries: dict[str, _ToolEntry] = field(default_factory=dict)
-
-
-# Module-level singleton populated by ``register_tools``.
-_catalog: _ToolCatalog | None = None
+    ``list_tools()`` is async while this runs from a synchronous server
+    constructor (itself sometimes called from inside a running event loop),
+    so the count is read off the local provider's component map instead.
+    ``local_provider`` is public API but ``_components`` is a FastMCP
+    internal: a future 3.x release may restructure it, and losing a number
+    from one startup log line is a far better failure mode than a server
+    that cannot boot.
+    """
+    try:
+        components = mcp.local_provider._components
+        return sum(1 for c in components.values() if isinstance(c, Tool))
+    except (AttributeError, TypeError):  # pragma: no cover - defensive
+        return None
 
 
 def register_tools(mcp: FastMCP) -> None:
-    """Register tools with the MCP server using the discovery pattern.
-
-    1. Register ALL tools from every category module.
-    2. Build a catalog with names, descriptions, and categories.
-    3. Remove all tools except the initial set + meta tools.
-    4. Register the meta tools (``list_available_tools``, ``enable_tools``, ``execute_tool``).
-    """
-    global _catalog  # noqa: PLW0603
-    _catalog = _ToolCatalog(mcp=mcp)
-
-    # --- Phase 1: register everything, capturing per-category membership ---
-    for category_label, register_fn in _CATEGORY_REGISTRATIONS:
-        before = set(mcp._local_provider._components.keys())
+    """Register every SurfSense tool with the MCP server."""
+    for register_fn in _CATEGORY_REGISTRATIONS:
         register_fn(mcp)
-        after = set(mcp._local_provider._components.keys())
 
-        for key in sorted(after - before):
-            name = key.split(":", 1)[1].rsplit("@", 1)[0]
-            comp = mcp._local_provider._components[key]
-            _catalog.entries[name] = _ToolEntry(
-                name=name,
-                description=comp.description or "",
-                category=category_label,
-                component=comp,
-            )
-
-    # --- Phase 2: determine which tools to keep ---
-    env_value = os.environ.get("SURFSENSE_MCP_ENABLED_TOOLS", "").strip()
-    if env_value:
-        enabled_set = {n.strip() for n in env_value.split(",") if n.strip()}
-        unknown = enabled_set - set(_catalog.entries)
-        if unknown:
-            logger.warning(
-                "SURFSENSE_MCP_ENABLED_TOOLS contains unknown tool names: %s",
-                ", ".join(sorted(unknown)),
-            )
-    else:
-        enabled_set = set(DEFAULT_TOOLS)
-
-    # --- Phase 3: remove tools not in the enabled set ---
-    for name, entry in _catalog.entries.items():
-        if name in enabled_set:
-            entry.enabled = True
-        else:
-            mcp._local_provider.remove_tool(name)
-
-    kept = sorted(n for n, e in _catalog.entries.items() if e.enabled)
+    count = _registered_tool_count(mcp)
     logger.info(
-        "Tool discovery: %d/%d tools enabled on startup: %s",
-        len(kept),
-        len(_catalog.entries),
-        ", ".join(kept),
+        "Registered %s tool(s) from %d category module(s)",
+        count if count is not None else "an unknown number of",
+        len(_CATEGORY_REGISTRATIONS),
     )
-
-    # --- Phase 4: register meta tools ---
-    _register_meta_tools(mcp)
-
-
-def _register_meta_tools(mcp: FastMCP) -> None:
-    """Register the meta tools for tool discovery and proxy execution."""
-
-    @mcp.tool()
-    async def list_available_tools() -> dict[str, Any]:
-        """List ALL available SurfSense MCP tools grouped by category.
-
-        Returns the full catalog of tools. Tools with enabled=false ARE
-        available — call enable_tools(tool_names=[...]) to activate them
-        before use.
-        """
-        assert _catalog is not None
-        categories: dict[str, list[dict[str, Any]]] = {}
-        for entry in _catalog.entries.values():
-            tool_info: dict[str, Any] = {
-                "name": entry.name,
-                "description": entry.description,
-                "enabled": entry.enabled,
-                "parameters": entry.component.parameters if hasattr(entry.component, "parameters") else {},
-            }
-            if not entry.enabled:
-                tool_info["action"] = "call enable_tools to activate"
-            categories.setdefault(entry.category, []).append(tool_info)
-
-        enabled_count = sum(1 for e in _catalog.entries.values() if e.enabled)
-        not_enabled_count = len(_catalog.entries) - enabled_count
-        return {
-            "total_tools": len(_catalog.entries),
-            "enabled_count": enabled_count,
-            "not_yet_enabled_count": not_enabled_count,
-            "how_to_activate": "call enable_tools(tool_names=[...]) to activate any not-yet-enabled tool",
-            "categories": categories,
-        }
-
-    @mcp.tool()
-    async def enable_tools(tool_names: list[str]) -> dict[str, Any]:
-        """REQUIRED before using any non-default tool. Activates additional
-        SurfSense tools by name so you can call them.
-
-        Args:
-            tool_names: List of tool names to enable (from ``list_available_tools``).
-        """
-        assert _catalog is not None
-        newly_enabled: list[str] = []
-        already_enabled: list[str] = []
-        unknown: list[str] = []
-
-        for name in tool_names:
-            entry = _catalog.entries.get(name)
-            if entry is None:
-                unknown.append(name)
-                continue
-            if entry.enabled:
-                already_enabled.append(name)
-                continue
-            _catalog.mcp._local_provider.add_tool(entry.component)
-            entry.enabled = True
-            newly_enabled.append(name)
-
-        if newly_enabled:
-            logger.info("Dynamically enabled tools: %s", ", ".join(sorted(newly_enabled)))
-
-        return {
-            "newly_enabled": sorted(newly_enabled),
-            "already_enabled": sorted(already_enabled),
-            "unknown": sorted(unknown),
-            "total_enabled": sum(1 for e in _catalog.entries.values() if e.enabled),
-        }
-
-    @mcp.tool()
-    async def execute_tool(tool_name: str, arguments: dict) -> Any:
-        """Execute any available tool by name. Use list_available_tools first
-        to discover tool names and their parameters.
-
-        Args:
-            tool_name: Name of the tool (from list_available_tools).
-            arguments: Dict of arguments matching the tool's parameters.
-        """
-        assert _catalog is not None
-        if tool_name in META_TOOLS:
-            return {"error": f"Meta tool '{tool_name}' must be called directly"}
-        entry = _catalog.entries.get(tool_name)
-        if entry is None:
-            return {"error": f"Unknown tool: {tool_name}", "hint": "Call list_available_tools to see available tools"}
-        return await entry.component.run(arguments)
+    # Deletes are off by default, so an upgraded instance loses them silently.
+    # Say so at startup rather than leaving a vanished tool as the only signal.
+    if not delete_tools_enabled():
+        logger.info("Destructive delete tools are DISABLED — set SURFSENSE_ENABLE_DELETE=1 to register them")

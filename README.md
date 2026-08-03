@@ -35,21 +35,23 @@ Chat (streaming):
 |---|---|
 | `query_surfsense` | Ask SurfSense a natural-language question. Streams over SSE from `POST /api/v1/new_chat`, creates a thread on demand, returns the concatenated answer + thread id. Subsumes summarize / compare / extract / quick_research / deep_research — just ask. |
 
-Discovery (always registered):
+### Tool listing
 
-| Tool | Description |
-|---|---|
-| `list_available_tools` | List ALL available tools grouped by category, showing which are currently enabled and their parameters. |
-| `enable_tools` | Dynamically enable additional tools by name at runtime. |
-| `execute_tool` | Execute any cataloged tool by name without enabling it first. |
+This server defines all 28 tools across 6 categories listed above. Every tool it registers is returned by `tools/list` up front — an LLM sees the real tool list on connect and calls tools directly, with no runtime discovery or enablement step in between. (The former `list_available_tools` / `enable_tools` / `execute_tool` meta tools were removed, along with the `SURFSENSE_MCP_ENABLED_TOOLS` override.)
 
-### Tool discovery
+5 of the 28 are opt-in, so a default deployment registers and lists only 23 — see below.
 
-Only 5 tools are registered on startup by default: `list_search_spaces`, `search_documents`, `query_surfsense`, `list_research_threads`, and `get_document`. The three meta tools (`list_available_tools`, `enable_tools`, and `execute_tool`) are always available.
+### Deletes are opt-in
 
-To access additional tools, call `list_available_tools` to see the full catalog (28 tools across 6 categories), then either call `execute_tool(tool_name='...', arguments={...})` to invoke any tool directly, or call `enable_tools` to activate tools for clients that support dynamic tool registration. This keeps the default tool surface small while making the full catalog discoverable.
+The 5 destructive tools above — `delete_search_space`, `delete_document`, `delete_research_thread`, `delete_report`, `delete_note` — are registered **only** when `SURFSENSE_ENABLE_DELETE` is truthy (`1` / `true` / `yes` / `on`, case- and whitespace-insensitive). By default the server registers 23 tools, the delete tools never appear on `tools/list`, and nothing the MCP client does can delete SurfSense data.
 
-Override the default set with the `SURFSENSE_MCP_ENABLED_TOOLS` environment variable (comma-separated tool names).
+Enable them deliberately:
+
+```bash
+SURFSENSE_ENABLE_DELETE=true
+```
+
+Note that `delete_search_space` cascades: it removes the space **and every document, thread, and report inside it**, irreversibly.
 
 ## Transport modes
 
@@ -266,7 +268,7 @@ The fastest way to verify a fresh deploy. Inspector is `npx`-installed, runs loc
 | `MCP_ENV` | optional | http | `production` triggers warnings when `MCP_ALLOWED_ORIGINS` is unset/`*` or `MCP_OAUTH_STORAGE_URL` is unset. Default `development`. |
 | `MCP_ALLOWED_ORIGINS` | optional | http | Comma-separated CORS origins. Default `*`. |
 | `MCP_LOG_LEVEL` | optional | both | `DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL` (case-insensitive). Unset → derived from `MCP_ENV`: `production` → `INFO`, anything else → `DEBUG`. Bogus values warn at startup and fall through to the env-derived default. |
-| `SURFSENSE_MCP_ENABLED_TOOLS` | optional | both | Comma-separated list of tool names to enable on startup. Overrides the default 5-tool set. Unset or empty enables the defaults; the two discovery meta tools are always registered regardless. |
+| `SURFSENSE_ENABLE_DELETE` | optional | both | When truthy (`1`/`true`/`yes`/`on`), registers the 5 `delete_*` tools (28 tools total). Default off — 23 tools, and the deletes never appear on `tools/list`. Note `delete_search_space` cascades to every document, thread and report in the space. |
 | `MCP_LOG_PAYLOADS` | optional | both | When truthy (`1`/`true`/`yes`/`on`), the structured-logging middleware includes tool request/response payloads. Default off — payloads can include chat prompts, document bodies, and base64 uploads. Useful for short debugging windows only. |
 
 ## Deployment in `foss-server-bundle-devstack`

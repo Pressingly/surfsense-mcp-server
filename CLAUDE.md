@@ -148,6 +148,7 @@ In the Moneta devstack the compose file always sets `MCP_OAUTH_STORAGE_URL=redis
 - Tools `raise` on non-2xx responses so FastMCP surfaces errors to the MCP client.
 - All tools open and close `httpx.AsyncClient` within the call using an `async with` block (client is not shared across calls).
 - Write tools (POST/PUT/DELETE) are allowed. Follow SurfSense's existing request schemas — do **not** introduce new fields.
+- **Deletes are opt-in.** The five `delete_*` tools are registered only when `SURFSENSE_ENABLE_DELETE` is truthy (`surfsense_mcp/config.py:delete_tools_enabled`, read at registration time and `.strip().lower()`-normalised so a trailing space in a `.env` can't flip it). Default is off: 23 tools registered, 28 with the flag. Any new destructive tool belongs inside the same `if delete_tools_enabled():` block in its module.
 - Chat/query tools consume SSE from `POST /api/v1/new_chat` via `httpx.AsyncClient.stream(...)`. Parse `text-delta` events (and the documented control events: `start`, `start-step`, `finish`, `finish-step`, `text-start`, `text-end`, `data-thinking-step`, `data-thread-title-update`) into a single concatenated string; fall back to raw JSON / raw text when the event shape is unknown. See DocuMentor's `_query_surfsense` for the reference event taxonomy.
 - Tools that create a thread on demand (when `thread_id` is `None`) must `POST /api/v1/threads` first, then stream, and return the new `thread_id` so callers can continue the conversation.
 - Binary/export responses (e.g. `GET /api/v1/reports/{id}/export`) return content-type + size, not inline bytes.
@@ -217,7 +218,7 @@ When adding tools, check these backend files to confirm route paths and query pa
 `tests/conftest.py` provides:
 
 - `mock_transport` — patches `httpx.AsyncClient.__init__` with a `MockTransport`. Returns a `setup(handler)` callable; calling it registers a response handler and returns a `recorded: list[httpx.Request]` for assertion.
-- `_env` (autouse) — sets `SURFSENSE_BASE_URL` and `SURFSENSE_JWT` per test via `monkeypatch`.
+- `_env` (autouse) — sets `SURFSENSE_BASE_URL`, `SURFSENSE_JWT`, and `SURFSENSE_ENABLE_DELETE=true` per test via `monkeypatch`. Note the whole suite therefore runs with deletes registered, which is the opposite of the production default. A test that asserts the default tool surface must first `monkeypatch.delenv("SURFSENSE_ENABLE_DELETE", raising=False)`.
 - `json_response(payload, status_code=200)` — helper to build `httpx.Response` from a dict.
 
 Tests use `Client(get_stdio_mcp())` (FastMCP in-process client) — no subprocess, no network.
